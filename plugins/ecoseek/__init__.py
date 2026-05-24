@@ -23,7 +23,7 @@ Env vars (set in ~/.hermes/.env):
   HERMES_REMOTE_TIMEOUT   - Request timeout in seconds (default: 300)
   DIDAL_MAX_TURNS         - Max dialogue turns (default: 20)
   DIDAL_STUCK_THRESHOLD   - Repeated errors before stopping (default: 3)
-  ECOAGENT_URL            - EcoAgent MCP server URL (default: http://localhost:8000)
+  ECOAGENT_URL            - EcoAgent tool server URL (default: http://localhost:8200)
   ECOAGENT_TIMEOUT        - EcoAgent request timeout (default: 120)
   KU_HPC_TIMEOUT          - Slurm command timeout (default: 30)
 
@@ -372,6 +372,7 @@ def register(ctx) -> None:
             script=args.get("script", ""),
             job_id=args.get("job_id", ""),
             partition=args.get("partition", ""),
+            command=args.get("command", ""),
             extra_args=args.get("extra_args", ""),
             task_id=kw.get("task_id"),
         ),
