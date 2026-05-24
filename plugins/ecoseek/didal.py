@@ -29,10 +29,24 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-_BROKER_URL = os.environ.get("ECOSEEK_BROKER_URL", "https://broker.ecoseek.org").rstrip("/")
+# Primary: direct connection to hermes.ecoseek.org
+_REMOTE_URL = os.environ.get("HERMES_REMOTE_URL", "https://hermes.ecoseek.org").rstrip("/")
+_API_KEY = os.environ.get("HERMES_ECOSEEK_API_KEY", "")
+_MODEL = os.environ.get("HERMES_REMOTE_MODEL", "hermes")
+_TIMEOUT = int(os.environ.get("HERMES_REMOTE_TIMEOUT", "300"))
+
+# Legacy fallback (broker)
+_BROKER_URL = os.environ.get("ECOSEEK_BROKER_URL", "").rstrip("/")
 _BROKER_KEY = os.environ.get("ECOSEEK_BROKER_KEY", "")
-_MODEL = os.environ.get("ECOSEEK_MODEL", "openclaw/main")
-_TIMEOUT = int(os.environ.get("ECOSEEK_TIMEOUT", "300"))
+
+
+def _get_remote_endpoint() -> tuple[str, str]:
+    """Return (url, auth_header) for the best available remote Hermes."""
+    if _REMOTE_URL and _API_KEY:
+        return _REMOTE_URL, f"Bearer {_API_KEY}"
+    if _BROKER_URL and _BROKER_KEY:
+        return _BROKER_URL, f"Bearer {_BROKER_KEY}"
+    return "", ""
 _MAX_TURNS = int(os.environ.get("DIDAL_MAX_TURNS", "20"))
 _STUCK_THRESHOLD = int(os.environ.get("DIDAL_STUCK_THRESHOLD", "3"))
 
@@ -87,7 +101,11 @@ def detect_stuck_loop(history: list[dict]) -> bool:
 # ---------------------------------------------------------------------------
 
 def _send_to_beta(system_prompt: str, messages: list[dict]) -> dict:
-    """Send a request to Beta (Hermes remote) via the broker."""
+    """Send a request to Beta (Hermes remote) via hermes.ecoseek.org."""
+    base_url, auth = _get_remote_endpoint()
+    if not base_url:
+        raise RuntimeError("No remote endpoint configured")
+
     api_messages = []
     if system_prompt:
         api_messages.append({"role": "system", "content": system_prompt})
@@ -104,11 +122,11 @@ def _send_to_beta(system_prompt: str, messages: list[dict]) -> dict:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    if _BROKER_KEY:
-        headers["Authorization"] = f"Bearer {_BROKER_KEY}"
+    if auth:
+        headers["Authorization"] = auth
 
     req = urllib.request.Request(
-        f"{_BROKER_URL}/v1/chat/completions",
+        f"{base_url}/v1/chat/completions",
         data=body,
         headers=headers,
         method="POST",
@@ -176,13 +194,13 @@ def dialectical_exchange(
     str
         JSON with the dialogue history and final result.
     """
-    if not _BROKER_URL or not _BROKER_KEY:
+    if not ((_REMOTE_URL and _API_KEY) or (_BROKER_URL and _BROKER_KEY)):
         return json.dumps({
             "success": False,
-            "error": "didal_not_configured",
+            "error": "hermes_not_configured",
             "message": (
-                "DiDAL requires ECOSEEK_BROKER_URL and ECOSEEK_BROKER_KEY. "
-                "Set them in ~/.hermes/.env to enable dialectical exchange."
+                "DiDAL requires HERMES_ECOSEEK_API_KEY (or legacy ECOSEEK_BROKER_URL "
+                "+ ECOSEEK_BROKER_KEY). Set in ~/.hermes/.env to enable."
             ),
         })
 
