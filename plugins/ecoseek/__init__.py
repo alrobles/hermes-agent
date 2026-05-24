@@ -287,13 +287,13 @@ DIALECTICAL_EXCHANGE_SCHEMA = {
 
 def register(ctx) -> None:
     """Register all EcoSeek tools. Called by the Hermes plugin loader."""
-    # Import sibling modules using relative imports so the plugin works
-    # from any location (~/.hermes/plugins/ecoseek/ or bundled plugins/).
+    # Import sibling modules. The plugin loader sets __name__ to
+    # "hermes_plugins.ecoseek" and __package__ to the same value,
+    # so relative imports resolve against that namespace.
     from importlib import import_module
-    pkg = __name__.rsplit(".", 1)[0] if "." in __name__ else __name__
-    didal_mod = import_module(".didal", package=pkg)
-    eco_mod = import_module(".eco_analyze", package=pkg)
-    hpc_mod = import_module(".ku_hpc", package=pkg)
+    didal_mod = import_module(".didal", package=__name__)
+    eco_mod = import_module(".eco_analyze", package=__name__)
+    hpc_mod = import_module(".ku_hpc", package=__name__)
 
     _didal_exchange = didal_mod.dialectical_exchange
     _eco_analyze = eco_mod.eco_analyze
