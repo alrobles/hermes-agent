@@ -1,11 +1,16 @@
 """eco_analyze — High-level EcoAgent tool wrapper for Beta executor.
 
-Provides a structured interface to the EcoAgent MCP server at localhost:8000.
+Provides a structured interface to the EcoAgent tool server at localhost:8200.
 Wraps common ecological analysis operations (species queries, SDM fitting,
 diversity metrics, taxonomy resolution, etc.) into a single tool.
 
 Available on reumanlab where EcoAgent is running. The check function verifies
 the server is reachable before exposing the tool.
+
+API contract with the EcoAgent tool_server:
+  GET  /health                       — health check
+  GET  /v1/tools                     — list available tools
+  POST /v1/tools/{name}/execute      — execute a tool by name
 """
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_ECOAGENT_URL = os.environ.get("ECOAGENT_URL", "http://localhost:8000").rstrip("/")
+_ECOAGENT_URL = os.environ.get("ECOAGENT_URL", "http://localhost:8200").rstrip("/")
 _TIMEOUT = int(os.environ.get("ECOAGENT_TIMEOUT", "120"))
 
 SUPPORTED_ACTIONS = (
@@ -75,13 +80,10 @@ def eco_analyze(
             "message": f"Unknown action: {action!r}. Supported: {', '.join(SUPPORTED_ACTIONS)}",
         })
 
-    body = json.dumps({
-        "action": action,
-        "params": params or {},
-    }).encode("utf-8")
+    body = json.dumps(params or {}).encode("utf-8")
 
     req = urllib.request.Request(
-        f"{_ECOAGENT_URL}/v1/tools/{action}",
+        f"{_ECOAGENT_URL}/v1/tools/{action}/execute",
         data=body,
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",

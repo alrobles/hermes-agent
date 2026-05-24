@@ -1,9 +1,9 @@
 name: ecoseek
-version: "0.5.0"
+version: "0.6.0"
 description: >
-  EcoSeek DiDAL Phase 2 — dual-agent architecture via hermes.ecoseek.org.
+  EcoSeek DiDAL Phase 3 — ku-hpc SSH wrapper + EcoAgent tool_server integration.
   Alpha tools: escalate_remote (one-shot), dialectical_exchange (debate loop).
-  Beta tools: eco_analyze (EcoAgent MCP wrapper), ku_hpc (Slurm HPC wrapper).
+  Beta tools: eco_analyze (EcoAgent tool_server), ku_hpc (SSH wrapper + Slurm fallback).
   Enable via `hermes plugins enable ecoseek`.
 author: EcoSeek / alrobles
 requires_env: []
