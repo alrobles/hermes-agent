@@ -1,18 +1,23 @@
 """ecoseek — Hermes plugin for EcoSeek ecological intelligence.
 
-Provides the ``escalate_remote`` tool that lets a local Emily agent delegate
-heavy-computation tasks to the remote Hermes instance on reumanlab.  The remote
-Hermes has access to DeepSeek v4 Pro, KU HPC cluster (A100/MI210), and advanced
-ecological tools.
+Provides two tools for the dual-agent architecture:
+
+  ``escalate_remote`` — simple one-shot delegation to Hermes remote
+  ``dialectical_exchange`` — DiDAL structured debate with Beta (plan → execute → critique → refine)
+
+The remote Hermes has access to DeepSeek v4 Pro, KU HPC cluster (A100/MI210),
+and advanced ecological tools.
 
 Activation is handled by the Hermes plugin system — enable with:
   hermes plugins enable ecoseek
 
 Optional env vars (set in ~/.hermes/.env):
-  ECOSEEK_BROKER_URL  - Broker endpoint (default: https://broker.ecoseek.org)
-  ECOSEEK_BROKER_KEY  - Broker session key for authenticated requests
-  ECOSEEK_MODEL       - Model name on remote Hermes (default: openclaw/main)
-  ECOSEEK_TIMEOUT     - Request timeout in seconds (default: 300)
+  ECOSEEK_BROKER_URL    - Broker endpoint (default: https://broker.ecoseek.org)
+  ECOSEEK_BROKER_KEY    - Broker session key for authenticated requests
+  ECOSEEK_MODEL         - Model name on remote Hermes (default: openclaw/main)
+  ECOSEEK_TIMEOUT       - Request timeout in seconds (default: 300)
+  DIDAL_MAX_TURNS       - Max dialogue turns (default: 20)
+  DIDAL_STUCK_THRESHOLD - Repeated errors before stopping (default: 3)
 """
 from __future__ import annotations
 
@@ -185,6 +190,9 @@ def escalate_remote(
 try:
     from tools.registry import registry
 
+    # Import DiDAL protocol
+    from plugins.ecoseek.didal import dialectical_exchange as _didal_exchange
+
     registry.register(
         name="escalate_remote",
         toolset="ecoseek",
@@ -194,9 +202,8 @@ try:
                 "Escalate a task to the remote Hermes agent on reumanlab. "
                 "The remote agent has access to DeepSeek v4 Pro, the KU HPC "
                 "cluster (A100/MI210 GPUs via Slurm), GitHub CLI, and advanced "
-                "ecological tools. Use this when the task requires heavy "
-                "computation, HPC resources, large datasets, advanced reasoning "
-                "beyond your local model, or access to reumanlab infrastructure."
+                "ecological tools. Use this for simple one-shot delegation when "
+                "you just need the remote agent to do something and return."
             ),
             "parameters": {
                 "type": "object",
@@ -233,6 +240,59 @@ try:
             task=args.get("task", ""),
             context=args.get("context", ""),
             urgency=args.get("urgency", "normal"),
+            task_id=kw.get("task_id"),
+        ),
+        check_fn=_is_configured,
+        requires_env=[],
+    )
+
+    registry.register(
+        name="dialectical_exchange",
+        toolset="ecoseek",
+        schema={
+            "name": "dialectical_exchange",
+            "description": (
+                "Start a DiDAL (Dialectical Dual-Agent Loop) exchange with Beta "
+                "(remote Hermes on reumanlab). Unlike escalate_remote, this tool "
+                "enables structured debate: you propose a plan, Beta executes and "
+                "critiques, you refine, and the loop continues until consensus. "
+                "Use this for complex multi-step tasks that benefit from iterative "
+                "refinement — SDM pipelines, HPC workflows, code review, or any "
+                "task where execution + critique improves the result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": (
+                            "The user's original task description. Be specific about "
+                            "what needs to be accomplished."
+                        ),
+                    },
+                    "plan": {
+                        "type": "string",
+                        "description": (
+                            "Your proposed plan of action. Include steps, code, data "
+                            "sources, and expected outputs. Beta will execute this and "
+                            "provide critique. If empty, Beta receives only the task."
+                        ),
+                    },
+                    "max_turns": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum dialogue turns before stopping. Default: 20. "
+                            "Lower for simple tasks, higher for complex workflows."
+                        ),
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+        handler=lambda args, **kw: _didal_exchange(
+            task=args.get("task", ""),
+            plan=args.get("plan", ""),
+            max_turns=args.get("max_turns", 0),
             task_id=kw.get("task_id"),
         ),
         check_fn=_is_configured,
