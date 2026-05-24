@@ -54,7 +54,7 @@ def _is_configured() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Tool implementation
+# Tool implementation — escalate_remote
 # ---------------------------------------------------------------------------
 
 def escalate_remote(
@@ -192,70 +192,121 @@ def escalate_remote(
 
 
 # ---------------------------------------------------------------------------
-# Tool registration
+# Tool schemas (shared between register() and legacy registration)
 # ---------------------------------------------------------------------------
 
-try:
-    from tools.registry import registry
-
-    # Import DiDAL protocol
-    from plugins.ecoseek.didal import dialectical_exchange as _didal_exchange
-
-    # Import Beta executor tools
-    from plugins.ecoseek.eco_analyze import (
-        ECO_ANALYZE_SCHEMA,
-        check_ecoagent_available,
-        eco_analyze as _eco_analyze,
-    )
-    from plugins.ecoseek.ku_hpc import (
-        KU_HPC_SCHEMA,
-        check_slurm_available,
-        ku_hpc as _ku_hpc,
-    )
-
-    registry.register(
-        name="escalate_remote",
-        toolset="ecoseek",
-        schema={
-            "name": "escalate_remote",
-            "description": (
-                "Escalate a task to the remote Hermes agent on reumanlab. "
-                "The remote agent has access to DeepSeek v4 Pro, the KU HPC "
-                "cluster (A100/MI210 GPUs via Slurm), GitHub CLI, and advanced "
-                "ecological tools. Use this for simple one-shot delegation when "
-                "you just need the remote agent to do something and return."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": (
-                            "Clear description of what the remote agent should accomplish. "
-                            "Be specific about inputs, expected outputs, and any constraints."
-                        ),
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": (
-                            "Optional background information or system-level instructions "
-                            "for the remote agent. Use this to provide ecological context, "
-                            "specify data sources, or set methodology preferences."
-                        ),
-                    },
-                    "urgency": {
-                        "type": "string",
-                        "enum": ["normal", "high", "background"],
-                        "description": (
-                            "Task urgency. 'high' for quick lookups (shorter timeout), "
-                            "'background' for long-running HPC jobs (longer timeout), "
-                            "'normal' for standard tasks."
-                        ),
-                    },
-                },
-                "required": ["task"],
+ESCALATE_REMOTE_SCHEMA = {
+    "name": "escalate_remote",
+    "description": (
+        "Escalate a task to the remote Hermes agent on reumanlab. "
+        "The remote agent has access to DeepSeek v4 Pro, the KU HPC "
+        "cluster (A100/MI210 GPUs via Slurm), GitHub CLI, and advanced "
+        "ecological tools. Use this for simple one-shot delegation when "
+        "you just need the remote agent to do something and return."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": (
+                    "Clear description of what the remote agent should accomplish. "
+                    "Be specific about inputs, expected outputs, and any constraints."
+                ),
+            },
+            "context": {
+                "type": "string",
+                "description": (
+                    "Optional background information or system-level instructions "
+                    "for the remote agent. Use this to provide ecological context, "
+                    "specify data sources, or set methodology preferences."
+                ),
+            },
+            "urgency": {
+                "type": "string",
+                "enum": ["normal", "high", "background"],
+                "description": (
+                    "Task urgency. 'high' for quick lookups (shorter timeout), "
+                    "'background' for long-running HPC jobs (longer timeout), "
+                    "'normal' for standard tasks."
+                ),
             },
         },
+        "required": ["task"],
+    },
+}
+
+DIALECTICAL_EXCHANGE_SCHEMA = {
+    "name": "dialectical_exchange",
+    "description": (
+        "Start a DiDAL (Dialectical Dual-Agent Loop) exchange with Beta "
+        "(remote Hermes on reumanlab). Unlike escalate_remote, this tool "
+        "enables structured debate: you propose a plan, Beta executes and "
+        "critiques, you refine, and the loop continues until consensus. "
+        "Use this for complex multi-step tasks that benefit from iterative "
+        "refinement — SDM pipelines, HPC workflows, code review, or any "
+        "task where execution + critique improves the result."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": (
+                    "The user's original task description. Be specific about "
+                    "what needs to be accomplished."
+                ),
+            },
+            "plan": {
+                "type": "string",
+                "description": (
+                    "Your proposed plan of action. Include steps, code, data "
+                    "sources, and expected outputs. Beta will execute this and "
+                    "provide critique. If empty, Beta receives only the task."
+                ),
+            },
+            "max_turns": {
+                "type": "integer",
+                "description": (
+                    "Maximum dialogue turns before stopping. Default: 20. "
+                    "Lower for simple tasks, higher for complex workflows."
+                ),
+            },
+        },
+        "required": ["task"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# register(ctx) — Plugin system entry point
+# ---------------------------------------------------------------------------
+# Called by the Hermes plugin loader for both bundled and user plugins.
+# Uses ctx.register_tool() which delegates to tools.registry.register().
+# ---------------------------------------------------------------------------
+
+def register(ctx) -> None:
+    """Register all EcoSeek tools. Called by the Hermes plugin loader."""
+    # Import sibling modules using relative imports so the plugin works
+    # from any location (~/.hermes/plugins/ecoseek/ or bundled plugins/).
+    from importlib import import_module
+    pkg = __name__.rsplit(".", 1)[0] if "." in __name__ else __name__
+    didal_mod = import_module(".didal", package=pkg)
+    eco_mod = import_module(".eco_analyze", package=pkg)
+    hpc_mod = import_module(".ku_hpc", package=pkg)
+
+    _didal_exchange = didal_mod.dialectical_exchange
+    _eco_analyze = eco_mod.eco_analyze
+    _check_ecoagent = eco_mod.check_ecoagent_available
+    _ku_hpc = hpc_mod.ku_hpc
+    _check_slurm = hpc_mod.check_slurm_available
+
+    # -- Alpha tools (local Emily → remote Beta) ---------------------------
+
+    ctx.register_tool(
+        name="escalate_remote",
+        toolset="ecoseek",
+        schema=ESCALATE_REMOTE_SCHEMA,
         handler=lambda args, **kw: escalate_remote(
             task=args.get("task", ""),
             context=args.get("context", ""),
@@ -263,52 +314,12 @@ try:
             task_id=kw.get("task_id"),
         ),
         check_fn=_is_configured,
-        requires_env=[],
     )
 
-    registry.register(
+    ctx.register_tool(
         name="dialectical_exchange",
         toolset="ecoseek",
-        schema={
-            "name": "dialectical_exchange",
-            "description": (
-                "Start a DiDAL (Dialectical Dual-Agent Loop) exchange with Beta "
-                "(remote Hermes on reumanlab). Unlike escalate_remote, this tool "
-                "enables structured debate: you propose a plan, Beta executes and "
-                "critiques, you refine, and the loop continues until consensus. "
-                "Use this for complex multi-step tasks that benefit from iterative "
-                "refinement — SDM pipelines, HPC workflows, code review, or any "
-                "task where execution + critique improves the result."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": (
-                            "The user's original task description. Be specific about "
-                            "what needs to be accomplished."
-                        ),
-                    },
-                    "plan": {
-                        "type": "string",
-                        "description": (
-                            "Your proposed plan of action. Include steps, code, data "
-                            "sources, and expected outputs. Beta will execute this and "
-                            "provide critique. If empty, Beta receives only the task."
-                        ),
-                    },
-                    "max_turns": {
-                        "type": "integer",
-                        "description": (
-                            "Maximum dialogue turns before stopping. Default: 20. "
-                            "Lower for simple tasks, higher for complex workflows."
-                        ),
-                    },
-                },
-                "required": ["task"],
-            },
-        },
+        schema=DIALECTICAL_EXCHANGE_SCHEMA,
         handler=lambda args, **kw: _didal_exchange(
             task=args.get("task", ""),
             plan=args.get("plan", ""),
@@ -316,28 +327,26 @@ try:
             task_id=kw.get("task_id"),
         ),
         check_fn=_is_configured,
-        requires_env=[],
     )
 
-    # -- Beta executor tools (available on reumanlab) ----------------------
+    # -- Beta tools (available on reumanlab) --------------------------------
 
-    registry.register(
+    ctx.register_tool(
         name="eco_analyze",
         toolset="ecoseek",
-        schema=ECO_ANALYZE_SCHEMA,
+        schema=eco_mod.ECO_ANALYZE_SCHEMA,
         handler=lambda args, **kw: _eco_analyze(
             action=args.get("action", ""),
             params=args.get("params"),
             task_id=kw.get("task_id"),
         ),
-        check_fn=check_ecoagent_available,
-        requires_env=[],
+        check_fn=_check_ecoagent,
     )
 
-    registry.register(
+    ctx.register_tool(
         name="ku_hpc",
         toolset="ecoseek",
-        schema=KU_HPC_SCHEMA,
+        schema=hpc_mod.KU_HPC_SCHEMA,
         handler=lambda args, **kw: _ku_hpc(
             action=args.get("action", ""),
             script=args.get("script", ""),
@@ -346,8 +355,7 @@ try:
             extra_args=args.get("extra_args", ""),
             task_id=kw.get("task_id"),
         ),
-        check_fn=check_slurm_available,
-        requires_env=[],
+        check_fn=_check_slurm,
     )
-except ImportError:
-    pass
+
+    logger.info("ecoseek plugin registered: 4 tools (escalate_remote, dialectical_exchange, eco_analyze, ku_hpc)")
