@@ -87,9 +87,14 @@ fi
 echo ""
 echo "Next steps:"
 echo "  1. Add env vars to ~/.hermes/.env:"
-echo "     ECOSEEK_BROKER_URL=https://broker.ecoseek.org"
-echo "     ECOSEEK_BROKER_KEY=<your-session-key>"
-echo "  2. Verify: hermes tools | grep ecoseek"
+echo "     HERMES_ECOSEEK_API_KEY=<your-api-key>"
+echo "     ECOAGENT_URL=http://localhost:8200  (if EcoAgent is running)"
+echo "  2. Deploy EcoAgent tool server (optional, enables eco_analyze):"
+echo "     git clone https://github.com/alrobles/ecoagent.git /tmp/ecoagent"
+echo "     pip install -e '/tmp/ecoagent[sdm]' --user"
+echo "     ECOAGENT_PROFILE=full python -m ecoagent.tool_server --port 8200 &"
+echo "  3. Restart gateway: hermes gateway run --replace"
+echo "  4. Verify: HERMES_PLUGINS_DEBUG=1 hermes tools list 2>&1 | grep ecoseek"
 
 # Cleanup temp dir if we cloned
 if [ "${CLEANUP_TMP:-0}" = "1" ] && [ -n "${TMPDIR:-}" ]; then
