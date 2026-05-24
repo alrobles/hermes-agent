@@ -1,4 +1,4 @@
-"""ecoseek — Hermes plugin for EcoSeek ecological intelligence.
+"""ecoseek — Hermes plugin for EcoSeek DiDAL Phase 2.
 
 Provides tools for the dual-agent architecture:
 
@@ -10,22 +10,26 @@ Provides tools for the dual-agent architecture:
   ``eco_analyze`` — structured interface to EcoAgent MCP server (GBIF, SDM, diversity)
   ``ku_hpc`` — KU HPC cluster operations via Slurm (submit, status, cancel, output)
 
-The remote Hermes has access to DeepSeek v4 Pro, KU HPC cluster (A100/MI210),
-and advanced ecological tools.
+Communication goes directly to hermes.ecoseek.org (preferred) with fallback
+to the legacy broker at broker.ecoseek.org.
 
 Activation is handled by the Hermes plugin system — enable with:
   hermes plugins enable ecoseek
 
-Optional env vars (set in ~/.hermes/.env):
-  ECOSEEK_BROKER_URL    - Broker endpoint (default: https://broker.ecoseek.org)
-  ECOSEEK_BROKER_KEY    - Broker session key for authenticated requests
-  ECOSEEK_MODEL         - Model name on remote Hermes (default: openclaw/main)
-  ECOSEEK_TIMEOUT       - Request timeout in seconds (default: 300)
-  DIDAL_MAX_TURNS       - Max dialogue turns (default: 20)
-  DIDAL_STUCK_THRESHOLD - Repeated errors before stopping (default: 3)
-  ECOAGENT_URL          - EcoAgent MCP server URL (default: http://localhost:8000)
-  ECOAGENT_TIMEOUT      - EcoAgent request timeout (default: 120)
-  KU_HPC_TIMEOUT        - Slurm command timeout (default: 30)
+Env vars (set in ~/.hermes/.env):
+  HERMES_REMOTE_URL       - Remote Hermes endpoint (default: https://hermes.ecoseek.org)
+  HERMES_ECOSEEK_API_KEY  - API key for hermes.ecoseek.org
+  HERMES_REMOTE_MODEL     - Model name on remote (default: hermes)
+  HERMES_REMOTE_TIMEOUT   - Request timeout in seconds (default: 300)
+  DIDAL_MAX_TURNS         - Max dialogue turns (default: 20)
+  DIDAL_STUCK_THRESHOLD   - Repeated errors before stopping (default: 3)
+  ECOAGENT_URL            - EcoAgent MCP server URL (default: http://localhost:8000)
+  ECOAGENT_TIMEOUT        - EcoAgent request timeout (default: 120)
+  KU_HPC_TIMEOUT          - Slurm command timeout (default: 30)
+
+  Legacy (fallback):
+  ECOSEEK_BROKER_URL      - Broker endpoint
+  ECOSEEK_BROKER_KEY      - Broker session key
 """
 from __future__ import annotations
 
@@ -42,15 +46,29 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-_BROKER_URL = os.environ.get("ECOSEEK_BROKER_URL", "https://broker.ecoseek.org").rstrip("/")
+# Primary: direct connection to hermes.ecoseek.org
+_REMOTE_URL = os.environ.get("HERMES_REMOTE_URL", "https://hermes.ecoseek.org").rstrip("/")
+_API_KEY = os.environ.get("HERMES_ECOSEEK_API_KEY", "")
+_MODEL = os.environ.get("HERMES_REMOTE_MODEL", "hermes")
+_TIMEOUT = int(os.environ.get("HERMES_REMOTE_TIMEOUT", "300"))
+
+# Legacy fallback (broker)
+_BROKER_URL = os.environ.get("ECOSEEK_BROKER_URL", "").rstrip("/")
 _BROKER_KEY = os.environ.get("ECOSEEK_BROKER_KEY", "")
-_MODEL = os.environ.get("ECOSEEK_MODEL", "openclaw/main")
-_TIMEOUT = int(os.environ.get("ECOSEEK_TIMEOUT", "300"))
 
 
 def _is_configured() -> bool:
-    """Return True when the remote broker is reachable (URL + key present)."""
-    return bool(_BROKER_URL and _BROKER_KEY)
+    """Return True when we can reach a remote Hermes (direct or via broker)."""
+    return bool((_REMOTE_URL and _API_KEY) or (_BROKER_URL and _BROKER_KEY))
+
+
+def _get_remote_endpoint() -> tuple[str, str]:
+    """Return (url, auth_header) for the best available remote Hermes."""
+    if _REMOTE_URL and _API_KEY:
+        return _REMOTE_URL, f"Bearer {_API_KEY}"
+    if _BROKER_URL and _BROKER_KEY:
+        return _BROKER_URL, f"Bearer {_BROKER_KEY}"
+    return "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -90,12 +108,14 @@ def escalate_remote(
     if not _is_configured():
         return json.dumps({
             "success": False,
-            "error": "ecoseek_not_configured",
+            "error": "hermes_not_configured",
             "message": (
-                "Remote escalation is not configured. Set ECOSEEK_BROKER_URL "
-                "and ECOSEEK_BROKER_KEY in ~/.hermes/.env to enable."
+                "Remote escalation is not configured. Set HERMES_ECOSEEK_API_KEY "
+                "in ~/.hermes/.env to enable (or legacy ECOSEEK_BROKER_URL + ECOSEEK_BROKER_KEY)."
             ),
         })
+
+    base_url, auth = _get_remote_endpoint()
 
     messages = []
     if context:
@@ -117,11 +137,11 @@ def escalate_remote(
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    if _BROKER_KEY:
-        headers["Authorization"] = f"Bearer {_BROKER_KEY}"
+    if auth:
+        headers["Authorization"] = auth
 
     req = urllib.request.Request(
-        f"{_BROKER_URL}/v1/chat/completions",
+        f"{base_url}/v1/chat/completions",
         data=body,
         headers=headers,
         method="POST",
