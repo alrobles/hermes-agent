@@ -1,9 +1,10 @@
 name: ecoseek
-version: "0.2.0"
+version: "0.3.0"
 description: >
   EcoSeek ecological intelligence plugin — dual-agent architecture with
   DiDAL (Dialectical Dual-Agent Loop) for iterative task refinement.
-  Includes escalate_remote (one-shot) and dialectical_exchange (debate loop).
+  Alpha tools: escalate_remote (one-shot), dialectical_exchange (debate loop).
+  Beta tools: eco_analyze (EcoAgent MCP wrapper), ku_hpc (Slurm HPC wrapper).
   Enable via `hermes plugins enable ecoseek`.
 author: EcoSeek / alrobles
 requires_env: []
