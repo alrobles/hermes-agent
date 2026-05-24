@@ -1,0 +1,9 @@
+name: ecoseek
+version: "0.1.0"
+description: >
+  EcoSeek ecological intelligence plugin — remote escalation to Hermes on
+  reumanlab for heavy computation, HPC jobs, and advanced ecological workflows.
+  Enable via `hermes plugins enable ecoseek`.
+author: EcoSeek / alrobles
+requires_env: []
+hooks: []
