@@ -1,9 +1,14 @@
 """ecoseek — Hermes plugin for EcoSeek ecological intelligence.
 
-Provides two tools for the dual-agent architecture:
+Provides tools for the dual-agent architecture:
 
+  **Alpha tools** (used by Emily local to talk to Beta):
   ``escalate_remote`` — simple one-shot delegation to Hermes remote
   ``dialectical_exchange`` — DiDAL structured debate with Beta (plan → execute → critique → refine)
+
+  **Beta tools** (used by Hermes remote for execution):
+  ``eco_analyze`` — structured interface to EcoAgent MCP server (GBIF, SDM, diversity)
+  ``ku_hpc`` — KU HPC cluster operations via Slurm (submit, status, cancel, output)
 
 The remote Hermes has access to DeepSeek v4 Pro, KU HPC cluster (A100/MI210),
 and advanced ecological tools.
@@ -18,6 +23,9 @@ Optional env vars (set in ~/.hermes/.env):
   ECOSEEK_TIMEOUT       - Request timeout in seconds (default: 300)
   DIDAL_MAX_TURNS       - Max dialogue turns (default: 20)
   DIDAL_STUCK_THRESHOLD - Repeated errors before stopping (default: 3)
+  ECOAGENT_URL          - EcoAgent MCP server URL (default: http://localhost:8000)
+  ECOAGENT_TIMEOUT      - EcoAgent request timeout (default: 120)
+  KU_HPC_TIMEOUT        - Slurm command timeout (default: 30)
 """
 from __future__ import annotations
 
@@ -193,6 +201,18 @@ try:
     # Import DiDAL protocol
     from plugins.ecoseek.didal import dialectical_exchange as _didal_exchange
 
+    # Import Beta executor tools
+    from plugins.ecoseek.eco_analyze import (
+        ECO_ANALYZE_SCHEMA,
+        check_ecoagent_available,
+        eco_analyze as _eco_analyze,
+    )
+    from plugins.ecoseek.ku_hpc import (
+        KU_HPC_SCHEMA,
+        check_slurm_available,
+        ku_hpc as _ku_hpc,
+    )
+
     registry.register(
         name="escalate_remote",
         toolset="ecoseek",
@@ -296,6 +316,37 @@ try:
             task_id=kw.get("task_id"),
         ),
         check_fn=_is_configured,
+        requires_env=[],
+    )
+
+    # -- Beta executor tools (available on reumanlab) ----------------------
+
+    registry.register(
+        name="eco_analyze",
+        toolset="ecoseek",
+        schema=ECO_ANALYZE_SCHEMA,
+        handler=lambda args, **kw: _eco_analyze(
+            action=args.get("action", ""),
+            params=args.get("params"),
+            task_id=kw.get("task_id"),
+        ),
+        check_fn=check_ecoagent_available,
+        requires_env=[],
+    )
+
+    registry.register(
+        name="ku_hpc",
+        toolset="ecoseek",
+        schema=KU_HPC_SCHEMA,
+        handler=lambda args, **kw: _ku_hpc(
+            action=args.get("action", ""),
+            script=args.get("script", ""),
+            job_id=args.get("job_id", ""),
+            partition=args.get("partition", ""),
+            extra_args=args.get("extra_args", ""),
+            task_id=kw.get("task_id"),
+        ),
+        check_fn=check_slurm_available,
         requires_env=[],
     )
 except ImportError:
