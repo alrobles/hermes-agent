@@ -30,13 +30,21 @@ SUPPORTED_ACTIONS = (
     "query_species",
     "query_papers",
     "compute_diversity",
+    "compute_clusters",
+    "search_literature",
+    "query_pubtator",
     "fit_sdm",
     "fit_maxent",
     "evaluate_niche",
     "resolve_taxonomy",
+    "resolve_worms",
     "query_cofid",
+    "validate_cofid",
     "extract_triplets",
     "build_knowledge_graph",
+    "query_graph_hosts",
+    "query_graph_parasites",
+    "query_gbif_literature",
     "query_gbif_parquet",
     "compute_bioclim",
     "compute_effort_bias",
@@ -152,12 +160,17 @@ ECO_ANALYZE_SCHEMA = {
                 "description": (
                     "The ecological analysis action to run. "
                     "query_species: search GBIF for occurrence data. "
+                    "query_gbif_literature: search GBIF literature database. "
+                    "search_literature: semantic vector search over indexed papers. "
+                    "query_papers: keyword search in paper abstracts. "
                     "fit_sdm/fit_maxent: fit species distribution models. "
-                    "compute_diversity: calculate diversity indices. "
-                    "resolve_taxonomy: validate and resolve taxonomic names. "
+                    "compute_diversity/compute_clusters: diversity indices and clustering. "
+                    "resolve_taxonomy/resolve_worms: validate taxonomic names via GBIF/WoRMS. "
+                    "query_cofid/validate_cofid: host-parasite interaction database. "
                     "query_gbif_parquet: fast columnar GBIF queries. "
                     "compute_bioclim: extract bioclimatic variables. "
-                    "extract_triplets/build_knowledge_graph: ecological knowledge extraction."
+                    "extract_triplets/build_knowledge_graph: ecological knowledge extraction. "
+                    "query_graph_hosts/query_graph_parasites: knowledge graph queries."
                 ),
             },
             "params": {
