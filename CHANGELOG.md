@@ -27,3 +27,11 @@
   `completion_tokens_details` instead of stripping them during normalization.
 
 - Tests for all bypass paths in `tests/gateway/test_api_server_fast_bypass.py`.
+
+- **`hermes_trace` opt-in telemetry** — send `"hermes": {"trace": true}` in the
+  request body to receive agent-loop telemetry in the response. Exposes per-LLM-call
+  token counts (prompt, cached, completion), timing, tool call names/durations,
+  iteration count, and gateway metadata. Non-streaming: `hermes_trace` top-level
+  field in JSON response. Streaming: `event: hermes.trace` SSE event before `[DONE]`.
+  Bounded at 50 entries; no PII (tool names only, never arguments or results).
+  Tests in `tests/gateway/test_hermes_trace.py`.
