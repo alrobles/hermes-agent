@@ -63,6 +63,48 @@ CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 
+# ---------------------------------------------------------------------------
+# hermes-fast / hermes-reasoner — bypass model aliases
+# ---------------------------------------------------------------------------
+# Model names matching these prefixes skip the AIAgent loop and proxy
+# directly to the upstream provider, eliminating the ~16K-token agentic
+# system prompt and multi-iteration tool-calling overhead.
+#
+# Syntax: hermes-fast[:<provider>[:<upstream_model>]]
+#         hermes-reasoner[:<provider>[:<upstream_model>]]
+#
+# hermes-reasoner additionally injects ``thinking`` and ``reasoning_effort``
+# parameters and preserves ``reasoning_content`` in SSE deltas.
+
+_FAST_MODEL_PREFIXES: frozenset = frozenset({"hermes-fast", "hermes-reasoner"})
+
+_REASONER_DEFAULTS: Dict[str, Any] = {
+    "thinking": {"type": "enabled"},
+    "reasoning_effort": "high",
+}
+
+
+def _parse_bypass_model(model_name: str) -> Optional[Dict[str, Any]]:
+    """Parse a bypass model name into routing info.
+
+    Returns ``None`` if *model_name* is not a bypass model.  Otherwise
+    returns ``{"alias": "hermes-fast"|"hermes-reasoner",
+               "provider": str|None, "upstream_model": str|None}``.
+    """
+    parts = model_name.split(":", 2)
+    alias = parts[0]
+    if alias not in _FAST_MODEL_PREFIXES:
+        return None
+    return {
+        "alias": alias,
+        "provider": parts[1] if len(parts) > 1 and parts[1] else None,
+        "upstream_model": parts[2] if len(parts) > 2 and parts[2] else None,
+    }
+
+
+def _is_reasoner_model(model_name: str) -> bool:
+    return model_name.split(":", 1)[0] == "hermes-reasoner"
+
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
@@ -1025,24 +1067,45 @@ class APIServerAdapter(BasePlatformAdapter):
         })
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
-        """GET /v1/models — return hermes-agent as an available model."""
+        """GET /v1/models — return available models including bypass aliases."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
 
+        now = int(time.time())
+        models = [
+            {
+                "id": self._model_name,
+                "object": "model",
+                "created": now,
+                "owned_by": "hermes",
+                "permission": [],
+                "root": self._model_name,
+                "parent": None,
+            },
+            {
+                "id": "hermes-fast",
+                "object": "model",
+                "created": now,
+                "owned_by": "hermes",
+                "permission": [],
+                "root": "hermes-fast",
+                "parent": None,
+            },
+            {
+                "id": "hermes-reasoner",
+                "object": "model",
+                "created": now,
+                "owned_by": "hermes",
+                "permission": [],
+                "root": "hermes-reasoner",
+                "parent": None,
+            },
+        ]
+
         return web.json_response({
             "object": "list",
-            "data": [
-                {
-                    "id": self._model_name,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "hermes",
-                    "permission": [],
-                    "root": self._model_name,
-                    "parent": None,
-                }
-            ],
+            "data": models,
         })
 
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
@@ -1089,6 +1152,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "session_continuity_header": "X-Hermes-Session-Id",
                 "session_key_header": "X-Hermes-Session-Key",
                 "cors": bool(self._cors_origins),
+                "fast_bypass": True,
+                "reasoner_bypass": True,
             },
             "endpoints": {
                 "health": {"method": "GET", "path": "/health"},
@@ -1122,6 +1187,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 {"error": {"message": "Missing or invalid 'messages' field", "type": "invalid_request_error"}},
                 status=400,
             )
+
+        # ----- Bypass check: hermes-fast / hermes-reasoner -----
+        model_name = body.get("model", self._model_name)
+        bypass = _parse_bypass_model(model_name)
+        if bypass is not None:
+            return await self._handle_chat_completions_fast(request, body, bypass)
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
 
@@ -1424,6 +1495,352 @@ class APIServerAdapter(BasePlatformAdapter):
                 response_headers["X-Hermes-Error"] = err_msg[:200]
 
         return web.json_response(response_data, headers=response_headers)
+
+    # ------------------------------------------------------------------
+    # hermes-fast / hermes-reasoner — direct upstream proxy
+    # ------------------------------------------------------------------
+
+    def _resolve_upstream_credentials(
+        self, bypass: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """Resolve upstream provider URL, API key, and model for bypass calls.
+
+        Uses the same ``resolve_runtime_provider`` path as the agent loop,
+        optionally overridden by the ``<provider>:<model>`` segments in the
+        bypass model name.
+        """
+        from gateway.run import (
+            _resolve_runtime_agent_kwargs,
+            _resolve_gateway_model,
+        )
+
+        runtime = _resolve_runtime_agent_kwargs()
+        base_url = runtime.get("base_url") or ""
+        api_key = runtime.get("api_key") or ""
+        provider = runtime.get("provider") or ""
+        upstream_model = _resolve_gateway_model()
+
+        # Override from model-name segments (hermes-fast:deepseek:deepseek-chat)
+        if bypass.get("provider"):
+            provider = bypass["provider"]
+        if bypass.get("upstream_model"):
+            upstream_model = bypass["upstream_model"]
+
+        # Resolve base_url from well-known providers when not explicitly set
+        if not base_url or bypass.get("provider"):
+            _provider_urls = {
+                "deepseek": "https://api.deepseek.com",
+                "openai": "https://api.openai.com",
+                "anthropic": "https://api.anthropic.com",
+                "openrouter": "https://openrouter.ai/api",
+                "ollama": "http://127.0.0.1:11434",
+            }
+            if provider in _provider_urls:
+                base_url = _provider_urls[provider]
+
+            # Try provider-specific env var for API key
+            if bypass.get("provider"):
+                _env_keys = {
+                    "deepseek": "DEEPSEEK_API_KEY",
+                    "openai": "OPENAI_API_KEY",
+                    "anthropic": "ANTHROPIC_API_KEY",
+                    "openrouter": "OPENROUTER_API_KEY",
+                }
+                env_key = _env_keys.get(provider)
+                if env_key:
+                    api_key = os.getenv(env_key, api_key)
+
+        # Ensure the URL ends with /v1 for OpenAI-compatible APIs
+        if base_url and not base_url.rstrip("/").endswith("/v1"):
+            base_url = base_url.rstrip("/") + "/v1"
+
+        return {
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": upstream_model,
+            "provider": provider,
+        }
+
+    async def _handle_chat_completions_fast(
+        self,
+        request: "web.Request",
+        body: Dict[str, Any],
+        bypass: Dict[str, Any],
+    ) -> "web.Response":
+        """Bypass the AIAgent loop and proxy directly to the upstream provider.
+
+        This handler is used for ``hermes-fast`` and ``hermes-reasoner``
+        model aliases.  It forwards the client's messages to the configured
+        upstream LLM provider without the agentic system prompt, tool
+        schemas, or multi-iteration loop — yielding sub-second TTFT for
+        simple chat-only prompts.
+
+        For ``hermes-reasoner``, ``thinking`` and ``reasoning_effort``
+        parameters are injected, and upstream ``reasoning_content`` is
+        preserved as a separate SSE delta field.
+        """
+        import aiohttp as _aiohttp
+
+        creds = self._resolve_upstream_credentials(bypass)
+        if not creds["base_url"]:
+            return web.json_response(
+                _openai_error(
+                    "No upstream provider configured. Set model.provider "
+                    "and credentials in config.yaml or environment.",
+                ),
+                status=502,
+            )
+
+        upstream_url = creds["base_url"].rstrip("/") + "/chat/completions"
+        stream = _coerce_request_bool(body.get("stream"), default=False)
+
+        # Build upstream request body — pass through most fields verbatim
+        upstream_body: Dict[str, Any] = {
+            "model": creds["model"],
+            "messages": body["messages"],
+            "stream": stream,
+        }
+        # Forward optional standard fields
+        for key in ("temperature", "top_p", "max_tokens", "stop",
+                     "frequency_penalty", "presence_penalty", "n", "seed",
+                     "response_format", "thinking", "reasoning_effort"):
+            if key in body:
+                upstream_body[key] = body[key]
+
+        # Reasoner-specific: inject thinking parameters (client override wins)
+        is_reasoner = _is_reasoner_model(body.get("model", ""))
+        if is_reasoner:
+            for k, v in _REASONER_DEFAULTS.items():
+                upstream_body.setdefault(k, v)
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if creds["api_key"]:
+            headers["Authorization"] = f"Bearer {creds['api_key']}"
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+        created = int(time.time())
+        model_label = body.get("model", "hermes-fast")
+
+        # CORS headers for StreamResponse
+        origin = request.headers.get("Origin", "")
+        cors = self._cors_headers_for_origin(origin) if origin else None
+
+        timeout = _aiohttp.ClientTimeout(total=300, connect=30)
+
+        if stream:
+            return await self._proxy_stream_fast(
+                request, upstream_url, headers, upstream_body,
+                completion_id, created, model_label, cors,
+                is_reasoner=is_reasoner, timeout=timeout,
+            )
+
+        # Non-streaming: single upstream call
+        try:
+            async with _aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    upstream_url, json=upstream_body, headers=headers,
+                ) as upstream_resp:
+                    if upstream_resp.status != 200:
+                        err_body = await upstream_resp.text()
+                        logger.warning(
+                            "Upstream %s returned %d: %s",
+                            upstream_url, upstream_resp.status, err_body[:300],
+                        )
+                        return web.json_response(
+                            _openai_error(
+                                f"Upstream provider error ({upstream_resp.status})",
+                                err_type="server_error",
+                            ),
+                            status=upstream_resp.status,
+                        )
+                    upstream_data = await upstream_resp.json()
+        except Exception as exc:
+            logger.error("Upstream request failed: %s", exc)
+            return web.json_response(
+                _openai_error(f"Upstream request failed: {exc}", err_type="server_error"),
+                status=502,
+            )
+
+        # Normalize the response — keep upstream usage details
+        upstream_usage = upstream_data.get("usage", {})
+        usage = {
+            "prompt_tokens": upstream_usage.get("prompt_tokens", 0),
+            "completion_tokens": upstream_usage.get("completion_tokens", 0),
+            "total_tokens": upstream_usage.get("total_tokens", 0),
+        }
+        for detail_key in ("prompt_tokens_details", "completion_tokens_details"):
+            if detail_key in upstream_usage:
+                usage[detail_key] = upstream_usage[detail_key]
+
+        choices = upstream_data.get("choices", [])
+        out_choices = []
+        for choice in choices:
+            msg = choice.get("message", {})
+            out_msg: Dict[str, Any] = {
+                "role": msg.get("role", "assistant"),
+                "content": msg.get("content", ""),
+            }
+            # Preserve reasoning_content for reasoner models
+            if is_reasoner and "reasoning_content" in msg:
+                out_msg["reasoning_content"] = msg["reasoning_content"]
+            out_choices.append({
+                "index": choice.get("index", 0),
+                "message": out_msg,
+                "finish_reason": choice.get("finish_reason", "stop"),
+            })
+
+        response_data = {
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model_label,
+            "choices": out_choices,
+            "usage": usage,
+        }
+        return web.json_response(response_data)
+
+    async def _proxy_stream_fast(
+        self,
+        request: "web.Request",
+        upstream_url: str,
+        headers: Dict[str, str],
+        upstream_body: Dict[str, Any],
+        completion_id: str,
+        created: int,
+        model_label: str,
+        cors: Optional[Dict[str, str]],
+        is_reasoner: bool = False,
+        timeout: Any = None,
+    ) -> "web.StreamResponse":
+        """Stream upstream SSE chunks back to the client.
+
+        For reasoner models, ``delta.reasoning_content`` is preserved as a
+        separate field alongside ``delta.content``.
+        """
+        import aiohttp as _aiohttp
+
+        sse_headers: Dict[str, str] = {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+        if cors:
+            sse_headers.update(cors)
+
+        response = web.StreamResponse(status=200, headers=sse_headers)
+        await response.prepare(request)
+
+        # Emit initial role chunk
+        role_chunk = {
+            "id": completion_id, "object": "chat.completion.chunk",
+            "created": created, "model": model_label,
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+        }
+        await response.write(f"data: {json.dumps(role_chunk)}\n\n".encode())
+
+        accumulated_usage: Dict[str, Any] = {}
+
+        try:
+            async with _aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    upstream_url, json=upstream_body, headers=headers,
+                ) as upstream_resp:
+                    if upstream_resp.status != 200:
+                        err_text = await upstream_resp.text()
+                        error_chunk = {
+                            "id": completion_id, "object": "chat.completion.chunk",
+                            "created": created, "model": model_label,
+                            "choices": [{"index": 0, "delta": {"content": f"[Upstream error {upstream_resp.status}]"}, "finish_reason": "error"}],
+                        }
+                        await response.write(f"data: {json.dumps(error_chunk)}\n\n".encode())
+                        await response.write(b"data: [DONE]\n\n")
+                        return response
+
+                    async for raw_line in upstream_resp.content:
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line:
+                            continue
+                        if line == "data: [DONE]":
+                            break
+                        if not line.startswith("data: "):
+                            continue
+
+                        try:
+                            chunk_data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Capture usage from the final chunk
+                        if "usage" in chunk_data:
+                            accumulated_usage = chunk_data["usage"]
+
+                        choices = chunk_data.get("choices", [])
+                        if not choices:
+                            continue
+
+                        upstream_delta = choices[0].get("delta", {})
+                        finish_reason = choices[0].get("finish_reason")
+
+                        # Build our delta
+                        delta: Dict[str, Any] = {}
+                        if "content" in upstream_delta and upstream_delta["content"]:
+                            delta["content"] = upstream_delta["content"]
+                        if is_reasoner and "reasoning_content" in upstream_delta:
+                            delta["reasoning_content"] = upstream_delta["reasoning_content"]
+
+                        if not delta and finish_reason is None:
+                            continue
+
+                        out_chunk: Dict[str, Any] = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_label,
+                            "choices": [{
+                                "index": 0,
+                                "delta": delta,
+                                "finish_reason": finish_reason,
+                            }],
+                        }
+                        await response.write(f"data: {json.dumps(out_chunk)}\n\n".encode())
+
+            # Final finish chunk with usage
+            usage = {
+                "prompt_tokens": accumulated_usage.get("prompt_tokens", 0),
+                "completion_tokens": accumulated_usage.get("completion_tokens", 0),
+                "total_tokens": accumulated_usage.get("total_tokens", 0),
+            }
+            for detail_key in ("prompt_tokens_details", "completion_tokens_details"):
+                if detail_key in accumulated_usage:
+                    usage[detail_key] = accumulated_usage[detail_key]
+
+            finish_chunk = {
+                "id": completion_id, "object": "chat.completion.chunk",
+                "created": created, "model": model_label,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": usage,
+            }
+            await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            logger.info("SSE client disconnected during fast bypass for %s", completion_id)
+        except Exception as exc:
+            logger.error("Fast bypass streaming error for %s: %s", completion_id, exc)
+            try:
+                error_chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model_label,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                }
+                await response.write(f"data: {json.dumps(error_chunk)}\n\n".encode())
+                await response.write(b"data: [DONE]\n\n")
+            except Exception:
+                pass
+
+        return response
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
