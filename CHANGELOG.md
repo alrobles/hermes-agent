@@ -22,9 +22,12 @@
 - **`/v1/capabilities` expanded** — `features.fast_bypass` and
   `features.reasoner_bypass` flags advertise bypass support.
 
-- **`usage.prompt_tokens_details` passthrough** — bypass responses preserve
-  upstream `prompt_tokens_details` (including `cached_tokens`) and
-  `completion_tokens_details` instead of stripping them during normalization.
+- **`usage.prompt_tokens_details` passthrough** — both bypass and agent-loop
+  responses now preserve `prompt_tokens_details` (including `cached_tokens`,
+  `cache_creation_tokens`) and `completion_tokens_details` (including
+  `reasoning_tokens`). Previously the agent-loop path stripped these fields
+  during usage normalization. Tests in
+  `tests/gateway/test_cached_tokens_passthrough.py`.
 
 - Tests for all bypass paths in `tests/gateway/test_api_server_fast_bypass.py`.
 

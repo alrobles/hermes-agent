@@ -143,6 +143,19 @@ def _coerce_request_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _build_usage_block(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """Build an OpenAI-compatible ``usage`` object, preserving detail sub-objects."""
+    out: Dict[str, Any] = {
+        "prompt_tokens": usage.get("input_tokens", 0),
+        "completion_tokens": usage.get("output_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+    for detail_key in ("prompt_tokens_details", "completion_tokens_details"):
+        if detail_key in usage:
+            out[detail_key] = usage[detail_key]
+    return out
+
+
 def _normalize_chat_content(
     content: Any, *, _max_depth: int = 10, _depth: int = 0,
 ) -> str:
@@ -1490,11 +1503,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "finish_reason": finish_reason,
                 }
             ],
-            "usage": {
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0),
-            },
+            "usage": _build_usage_block(usage),
         }
         if is_partial or is_failed or not completed:
             response_data["hermes"] = {
@@ -1971,11 +1980,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "id": completion_id, "object": "chat.completion.chunk",
                 "created": created, "model": model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                "usage": {
-                    "prompt_tokens": usage.get("input_tokens", 0),
-                    "completion_tokens": usage.get("output_tokens", 0),
-                    "total_tokens": usage.get("total_tokens", 0),
-                },
+                "usage": _build_usage_block(usage),
             }
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
 
@@ -3320,6 +3325,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                 "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
             }
+            _cached = getattr(agent, "session_cache_read_tokens", 0) or 0
+            _cache_write = getattr(agent, "session_cache_write_tokens", 0) or 0
+            if _cached or _cache_write:
+                usage["prompt_tokens_details"] = {"cached_tokens": _cached}
+                if _cache_write:
+                    usage["prompt_tokens_details"]["cache_creation_tokens"] = _cache_write
+            _reasoning = getattr(agent, "session_reasoning_tokens", 0) or 0
+            if _reasoning:
+                usage["completion_tokens_details"] = {"reasoning_tokens": _reasoning}
             # Include the effective session ID in the result so callers
             # (e.g. X-Hermes-Session-Id header) can track compression-
             # triggered session rotations. (#16938)
