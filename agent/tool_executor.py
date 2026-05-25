@@ -383,6 +383,15 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 except Exception as _ver_err:
                     logging.debug("file-mutation verifier record failed: %s", _ver_err)
 
+            # Record tool call in hermes_trace if active
+            _trace = getattr(agent, "_hermes_trace", None)
+            if _trace is not None and not blocked:
+                _trace.record_tool_call(
+                    name=function_name,
+                    duration_ms=int(tool_duration * 1000),
+                    status="error" if is_error else "ok",
+                )
+
             if not blocked and agent.tool_progress_callback:
                 try:
                     agent.tool_progress_callback(
@@ -805,6 +814,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
         else:
             logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, _result_len)
+
+        # Record tool call in hermes_trace if active
+        _trace = getattr(agent, "_hermes_trace", None)
+        if _trace is not None and not _execution_blocked:
+            _trace.record_tool_call(
+                name=function_name,
+                duration_ms=int(tool_duration * 1000),
+                status="error" if _is_error_result else "ok",
+            )
 
         # Track file-mutation outcome for the turn-end verifier.  See
         # the concurrent path for the rationale; both paths must feed

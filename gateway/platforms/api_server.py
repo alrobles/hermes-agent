@@ -1293,6 +1293,19 @@ class APIServerAdapter(BasePlatformAdapter):
         model_name = body.get("model", self._model_name)
         created = int(time.time())
 
+        # Opt-in hermes_trace telemetry
+        _want_trace = False
+        _hermes_ext = body.get("hermes")
+        if isinstance(_hermes_ext, dict) and _hermes_ext.get("trace") is True:
+            _want_trace = True
+        _trace_obj = None
+        if _want_trace:
+            from agent.hermes_trace import HermesTrace
+            _trace_obj = HermesTrace(
+                model=model_name,
+                session_id=session_id,
+            )
+
         if stream:
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
@@ -1375,6 +1388,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                hermes_trace=_trace_obj,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -1394,6 +1408,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                hermes_trace=_trace_obj,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -1493,6 +1508,11 @@ class APIServerAdapter(BasePlatformAdapter):
             response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
             if err_msg:
                 response_headers["X-Hermes-Error"] = err_msg[:200]
+
+        # Attach hermes_trace when opt-in and available
+        _result_trace = result.get("hermes_trace")
+        if _result_trace:
+            response_data["hermes_trace"] = _result_trace
 
         return web.json_response(response_data, headers=response_headers)
 
@@ -1939,6 +1959,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            result = {}
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
@@ -1957,6 +1978,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 },
             }
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
+
+            # Emit hermes.trace SSE event before [DONE] when opt-in
+            _sse_trace = result.get("hermes_trace") if isinstance(result, dict) else None
+            if _sse_trace:
+                _trace_payload = json.dumps(_sse_trace)
+                await response.write(
+                    f"event: hermes.trace\ndata: {_trace_payload}\n\n".encode()
+                )
+
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             # Client disconnected mid-stream.  Interrupt the agent so it
@@ -3250,6 +3280,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        hermes_trace=None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3274,6 +3305,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
             )
+            if hermes_trace is not None:
+                agent._hermes_trace = hermes_trace
             if agent_ref is not None:
                 agent_ref[0] = agent
             effective_task_id = session_id or str(uuid.uuid4())

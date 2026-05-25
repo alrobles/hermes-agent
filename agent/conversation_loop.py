@@ -599,6 +599,11 @@ def run_conversation(
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
 
+    # Hermes trace: initialize if the caller requested telemetry.
+    # The gateway sets ``agent._hermes_trace`` when the request body
+    # contains ``"hermes": {"trace": true}``.
+    _trace = getattr(agent, "_hermes_trace", None)
+
     # Main conversation loop
     api_call_count = 0
     final_response = None
@@ -1694,6 +1699,18 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+
+                    # Record LLM call in hermes_trace if active
+                    if _trace is not None:
+                        _trace.record_llm_call(
+                            iteration=api_call_count,
+                            upstream=agent.provider or "unknown",
+                            model=agent.model or "",
+                            prompt_tokens=prompt_tokens,
+                            cached_tokens=canonical_usage.cache_read_tokens,
+                            completion_tokens=completion_tokens,
+                            total_ms=int(api_duration * 1000),
+                        )
 
                     # Log API call details for debugging/observability
                     _cache_pct = ""
@@ -4223,6 +4240,8 @@ def run_conversation(
         "cost_source": agent.session_cost_source,
         "session_id": agent.session_id,
     }
+    if _trace is not None:
+        result["hermes_trace"] = _trace.to_dict()
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # If a /steer landed after the final assistant turn (no more tool
