@@ -574,8 +574,11 @@ class TestModelsEndpoint:
             assert resp.status == 200
             data = await resp.json()
             assert data["object"] == "list"
-            assert len(data["data"]) == 1
-            assert data["data"][0]["id"] == "hermes-agent"
+            assert len(data["data"]) == 3
+            model_ids = [m["id"] for m in data["data"]]
+            assert "hermes-agent" in model_ids
+            assert "hermes-fast" in model_ids
+            assert "hermes-reasoner" in model_ids
             assert data["data"][0]["owned_by"] == "hermes"
 
     @pytest.mark.asyncio
