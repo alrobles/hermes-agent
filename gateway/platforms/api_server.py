@@ -656,6 +656,45 @@ except ImportError:
     _cron_trigger = None
 
 
+
+# --------------------------------------------------------------------------
+# hermes-fast: agent-loop bypass for low-latency chat completions
+# --------------------------------------------------------------------------
+#
+# When a request arrives with a model name in ``_FAST_MODELS`` (or any name
+# prefixed ``hermes-fast``), the gateway skips the AIAgent loop entirely and
+# proxies the request to the configured upstream provider. Tools, memory,
+# skills, and session compression are bypassed. This is the escape hatch
+# for callers that want raw model latency.
+#
+# Routing:
+#   model = "hermes-fast"                                 → default provider, default model
+#   model = "hermes-fast:<provider>"                      → provider's default model
+#   model = "hermes-fast:<provider>:<upstream_model>"     → exact model on provider
+#
+# See PR notes for rationale and benchmarks.
+# --------------------------------------------------------------------------
+
+_FAST_MODELS: frozenset[str] = frozenset({"hermes-fast"})
+
+
+def _is_fast_model(model_name: str) -> bool:
+    """Return True if this request should bypass the agent loop."""
+    if not model_name:
+        return False
+    base = model_name.split(":", 1)[0]
+    return base in _FAST_MODELS
+
+
+def _parse_fast_model(model_name: str):
+    """Parse a hermes-fast spec into (base, provider, upstream_model)."""
+    parts = model_name.split(":", 2)
+    base = parts[0]
+    provider = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+    upstream = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
+    return base, provider, upstream
+
+
 class APIServerAdapter(BasePlatformAdapter):
     """
     OpenAI-compatible HTTP API server adapter.
@@ -1041,6 +1080,19 @@ class APIServerAdapter(BasePlatformAdapter):
                     "permission": [],
                     "root": self._model_name,
                     "parent": None,
+                },
+                {
+                    "id": "hermes-fast",
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "hermes",
+                    "permission": [],
+                    "root": "hermes-fast",
+                    "parent": None,
+                    "metadata": {
+                        "mode": "fast",
+                        "description": "Agent-loop bypass: direct upstream proxy for low-latency chat.",
+                    },
                 }
             ],
         })
@@ -1122,6 +1174,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 {"error": {"message": "Missing or invalid 'messages' field", "type": "invalid_request_error"}},
                 status=400,
             )
+
+        # ── hermes-fast bypass: skip the agent loop for opt-in callers ─
+        _requested_model = body.get("model", "") or ""
+        if _is_fast_model(_requested_model):
+            return await self._handle_chat_completions_fast(request, body, _requested_model)
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
 
@@ -1424,6 +1481,140 @@ class APIServerAdapter(BasePlatformAdapter):
                 response_headers["X-Hermes-Error"] = err_msg[:200]
 
         return web.json_response(response_data, headers=response_headers)
+
+    async def _handle_chat_completions_fast(
+        self,
+        request: "web.Request",
+        body: "Dict[str, Any]",
+        model_name: str,
+    ) -> "web.Response":
+        """Agent-loop-bypass handler for hermes-fast models.
+
+        Forwards the OpenAI Chat Completions body directly to the configured
+        upstream provider. No AIAgent, no tools, no system-prompt layering.
+        Auth/CORS were already validated by the caller.
+        """
+        _, provider_override, upstream_model_override = _parse_fast_model(model_name)
+
+        try:
+            from agent.auxiliary_client import resolve_provider_client
+        except Exception as exc:
+            logger.error("hermes-fast: cannot import resolve_provider_client: %s", exc)
+            return web.json_response(
+                _openai_error("Internal: provider resolver unavailable", err_type="server_error"),
+                status=500,
+            )
+
+        provider_name = provider_override or getattr(self, "_fast_default_provider", None)
+        if not provider_name:
+            try:
+                from hermes_cli.runtime_provider import get_runtime_provider  # type: ignore
+                provider_name = (get_runtime_provider() or {}).get("provider")
+            except Exception:
+                provider_name = None
+        if not provider_name:
+            provider_name = "auto"
+
+        try:
+            client, resolved_model = resolve_provider_client(
+                provider=provider_name,
+                model=upstream_model_override,
+                async_mode=False,
+                api_mode="chat_completions",
+            )
+        except Exception as exc:
+            logger.error("hermes-fast: resolve_provider_client raised: %s", exc, exc_info=True)
+            return web.json_response(
+                _openai_error(f"hermes-fast: provider resolution failed: {exc}",
+                              err_type="server_error", code="upstream_unavailable"),
+                status=503,
+            )
+        if client is None or resolved_model is None:
+            return web.json_response(
+                _openai_error(
+                    f"hermes-fast: provider '{provider_name}' has no usable credentials",
+                    err_type="server_error", code="upstream_unavailable",
+                ),
+                status=503,
+            )
+
+        upstream_body = {k: v for k, v in body.items() if k != "model"}
+        upstream_body["model"] = resolved_model
+        stream = bool(upstream_body.get("stream", False))
+
+        if not stream:
+            try:
+                completion = await asyncio.to_thread(
+                    lambda: client.chat.completions.create(**upstream_body)
+                )
+            except Exception as exc:
+                logger.warning("hermes-fast non-stream upstream error: %s", exc)
+                return web.json_response(
+                    _openai_error(f"hermes-fast upstream: {exc}",
+                                  err_type="server_error", code="upstream_error"),
+                    status=502,
+                )
+            try:
+                payload = completion.model_dump(exclude_unset=False)
+            except AttributeError:
+                payload = json.loads(completion.model_dump_json())
+            payload["model"] = model_name
+            payload.setdefault(
+                "system_fingerprint",
+                f"hermes-fast:{provider_name}:{resolved_model}",
+            )
+            return web.json_response(payload)
+
+        # ── Streaming path ────────────────────────────────────────────────
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await resp.prepare(request)
+
+        sse_queue: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+
+        def _producer() -> None:
+            try:
+                upstream_body["stream"] = True
+                for chunk in client.chat.completions.create(**upstream_body):
+                    try:
+                        as_dict = chunk.model_dump(exclude_unset=False)
+                    except AttributeError:
+                        as_dict = json.loads(chunk.model_dump_json())
+                    if as_dict.get("model"):
+                        as_dict["model"] = model_name
+                    sse_queue.put_nowait(f"data: {json.dumps(as_dict)}\n\n")
+                sse_queue.put_nowait("data: [DONE]\n\n")
+            except Exception as exc:
+                logger.warning("hermes-fast stream upstream error: %s", exc)
+                err = _openai_error(str(exc), err_type="server_error", code="upstream_error")
+                sse_queue.put_nowait(f"data: {json.dumps(err)}\n\n")
+                sse_queue.put_nowait("data: [DONE]\n\n")
+            finally:
+                sse_queue.put_nowait(None)
+
+        producer = asyncio.ensure_future(asyncio.to_thread(_producer))
+        try:
+            while True:
+                item = await sse_queue.get()
+                if item is None:
+                    break
+                await resp.write(item.encode("utf-8"))
+        finally:
+            if not producer.done():
+                producer.cancel()
+                try:
+                    await producer
+                except BaseException:
+                    pass
+        await resp.write_eof()
+        return resp
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
