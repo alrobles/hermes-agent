@@ -712,8 +712,33 @@ def register(ctx) -> None:
         check_fn=lambda: True,  # No external dep needed
     )
 
+    # -- Subagent delegation (VoltAgent-inspired fan-out) -------------------
+
+    delegate_mod = import_module(".subagent_delegate", package=__name__)
+
+    ctx.register_tool(
+        name="delegate_task",
+        toolset="ecoseek",
+        schema=delegate_mod.DELEGATE_TASK_SCHEMA,
+        handler=lambda args, **kw: delegate_mod.delegate_task(
+            task=args.get("task", ""),
+            target_agents=args.get("target_agents", []),
+            context=args.get("context"),
+            parallel=args.get("parallel", True),
+        ),
+        check_fn=_is_configured,
+    )
+
+    ctx.register_tool(
+        name="list_subagents",
+        toolset="ecoseek",
+        schema=delegate_mod.LIST_SUBAGENTS_SCHEMA,
+        handler=lambda args, **kw: delegate_mod.list_subagents(),
+        check_fn=lambda: True,
+    )
+
     logger.info(
-        "ecoseek plugin registered: 6 tools "
+        "ecoseek plugin registered: 8 tools "
         "(escalate_remote, dialectical_exchange, eco_analyze, ku_hpc, "
-        "fire_and_forget, pattern_check)"
+        "fire_and_forget, pattern_check, delegate_task, list_subagents)"
     )
