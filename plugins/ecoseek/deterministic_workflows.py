@@ -27,14 +27,47 @@ _API_KEY = os.environ.get("HERMES_ECOSEEK_API_KEY", "")
 _HPC_USER = "a474r867"
 
 
-def _exec_raw(command: str, timeout: int = 30) -> str:
-    """Execute a raw command on Hermes (ku-hpc) with minimal overhead.
+def _exec_raw(command: str, timeout: int = 30) -> tuple:
+    """Execute a raw command on the HPC cluster.
 
-    Uses the system prompt "terminal mode" to force raw output.
-    This costs ~200 completion tokens (vs ~1700 for natural language).
+    Strategy (in order of preference):
+    1. Direct SSH (if running on reumanlab — 0 LLM tokens)
+    2. Cluster HTTP API at r10r18n02:8888 (if tunnel active — 0 LLM tokens)
+    3. Fallback: Hermes gateway call (~200 tokens)
     """
+    import subprocess
+
+    # Strategy 1: Direct SSH from reumanlab (0 tokens)
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+             f"{_HPC_USER}@hpc.crc.ku.edu", command],
+            capture_output=True, text=True, timeout=timeout
+        )
+        if result.returncode == 0 or result.stdout:
+            output = result.stdout or result.stderr
+            return output.strip(), {"completion_tokens": 0, "source": "direct_ssh"}
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # Strategy 2: Cluster HTTP API (0 tokens)
+    try:
+        api_body = json.dumps({"command": command}).encode("utf-8")
+        api_req = urllib.request.Request(
+            "http://localhost:8888/exec",
+            data=api_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(api_req, timeout=timeout) as resp:
+            api_data = json.loads(resp.read().decode("utf-8"))
+        return api_data.get("output", ""), {"completion_tokens": 0, "source": "cluster_api"}
+    except Exception:
+        pass
+
+    # Strategy 3: Hermes gateway (fallback, ~200 tokens)
     if not _REMOTE_URL or not _API_KEY:
-        return json.dumps({"error": "not_configured"})
+        return "error: no execution method available", {}
 
     body = json.dumps({
         "model": os.environ.get("HERMES_REMOTE_MODEL", "hermes"),
@@ -60,9 +93,10 @@ def _exec_raw(command: str, timeout: int = 30) -> str:
             data = json.loads(resp.read().decode("utf-8"))
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         usage = data.get("usage", {})
+        usage["source"] = "hermes_gateway"
         return content, usage
     except Exception as exc:
-        return str(exc), {}
+        return str(exc), {"source": "error"}
 
 
 # ---------------------------------------------------------------------------
