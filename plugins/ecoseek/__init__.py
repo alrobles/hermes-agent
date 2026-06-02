@@ -79,6 +79,8 @@ def escalate_remote(
     task: str,
     context: str = "",
     urgency: str = "normal",
+    response_format: str = "compact",
+    max_tokens: int = 0,
     task_id: Optional[str] = None,
 ) -> str:
     """Send a task to the remote Hermes agent on reumanlab.
@@ -97,6 +99,11 @@ def escalate_remote(
         Background information or system instructions for the remote agent.
     urgency : str, optional
         One of "normal", "high", "background". Affects timeout behavior.
+    response_format : str, optional
+        Response format: "compact" (JSON-only, no prose — default),
+        "structured" (key:value pairs), "full" (natural language).
+    max_tokens : int, optional
+        Maximum response tokens. 0 = no limit. Use 200-500 for status checks.
     task_id : str, optional
         Internal Hermes task ID (injected by the tool framework).
 
@@ -118,8 +125,25 @@ def escalate_remote(
     base_url, auth = _get_remote_endpoint()
 
     messages = []
+
+    # Build system prompt based on response_format
+    system_parts = []
+    if response_format == "compact":
+        system_parts.append(
+            "RESPONSE RULES: Reply ONLY with a JSON object. No prose, no markdown, "
+            "no explanation. Schema: {\"result\": ..., \"error\": null} or "
+            "{\"result\": null, \"error\": \"msg\"}. Keep values minimal."
+        )
+    elif response_format == "structured":
+        system_parts.append(
+            "RESPONSE RULES: Reply with key:value pairs, one per line. "
+            "No prose, no markdown. Example: status:RUNNING\njobs:5\nerrors:0"
+        )
     if context:
-        messages.append({"role": "system", "content": context})
+        system_parts.append(context)
+    if system_parts:
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+
     messages.append({"role": "user", "content": task})
 
     timeout = _TIMEOUT
@@ -128,10 +152,14 @@ def escalate_remote(
     elif urgency == "background":
         timeout = max(_TIMEOUT, 600)
 
-    body = json.dumps({
+    request_body: dict = {
         "model": _MODEL,
         "messages": messages,
-    }).encode("utf-8")
+    }
+    if max_tokens > 0:
+        request_body["max_tokens"] = max_tokens
+
+    body = json.dumps(request_body).encode("utf-8")
 
     headers = {
         "Content-Type": "application/json",
@@ -221,8 +249,9 @@ ESCALATE_REMOTE_SCHEMA = {
         "Escalate a task to the remote Hermes agent on reumanlab. "
         "The remote agent has access to DeepSeek v4 Pro, the KU HPC "
         "cluster (A100/MI210 GPUs via Slurm), GitHub CLI, and advanced "
-        "ecological tools. Use this for simple one-shot delegation when "
-        "you just need the remote agent to do something and return."
+        "ecological tools. Use for one-shot delegation. "
+        "TIP: Use response_format='compact' + max_tokens=300 for status "
+        "checks to save 5-10x tokens vs full prose responses."
     ),
     "parameters": {
         "type": "object",
@@ -249,6 +278,23 @@ ESCALATE_REMOTE_SCHEMA = {
                     "Task urgency. 'high' for quick lookups (shorter timeout), "
                     "'background' for long-running HPC jobs (longer timeout), "
                     "'normal' for standard tasks."
+                ),
+            },
+            "response_format": {
+                "type": "string",
+                "enum": ["compact", "structured", "full"],
+                "description": (
+                    "Response format. 'compact' (default): JSON-only, no prose — "
+                    "best for programmatic use, saves ~70% tokens. 'structured': "
+                    "key:value pairs. 'full': natural language (legacy behavior)."
+                ),
+            },
+            "max_tokens": {
+                "type": "integer",
+                "description": (
+                    "Max response tokens. 0 = unlimited. Use 200-500 for status "
+                    "checks, 1000+ for complex tasks. Saves cost when you only "
+                    "need a yes/no or a short result."
                 ),
             },
         },
@@ -331,6 +377,8 @@ def register(ctx) -> None:
             task=args.get("task", ""),
             context=args.get("context", ""),
             urgency=args.get("urgency", "normal"),
+            response_format=args.get("response_format", "compact"),
+            max_tokens=args.get("max_tokens", 0),
             task_id=kw.get("task_id"),
         ),
         check_fn=_is_configured,
