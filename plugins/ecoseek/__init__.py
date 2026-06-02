@@ -308,6 +308,197 @@ def escalate_remote(
 
 
 # ---------------------------------------------------------------------------
+# Pattern Library — known errors with automatic fixes (T0 delegation)
+# ---------------------------------------------------------------------------
+
+_PATTERN_LIBRARY = [
+    {
+        "error": r"libRlapack\.so|libRblas\.so",
+        "fix_cmd": "export APPTAINERENV_LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu",
+        "description": "R LAPACK/BLAS library not found in container",
+        "confidence": 0.99,
+    },
+    {
+        "error": r"oom-kill|Out of memory|Cannot allocate memory",
+        "fix_cmd": "sed -i 's/--mem=.*/--mem=64G/' {script}",
+        "description": "Job killed by OOM — increase memory allocation",
+        "confidence": 0.95,
+    },
+    {
+        "error": r"convergence|ll_range|max_pdist",
+        "fix_cmd": "sed -i 's/num_starts.*=.*/num_starts = 1500/' {script}",
+        "description": "Optimization did not converge — increase starting points",
+        "confidence": 0.80,
+    },
+    {
+        "error": r"ModuleNotFoundError|there is no package",
+        "fix_cmd": "apptainer exec {sif} Rscript -e 'install.packages(\"{pkg}\")'",
+        "description": "Missing R/Python package inside container",
+        "confidence": 0.70,
+    },
+    {
+        "error": r"DUE TO TIME LIMIT|TIMEOUT|exceeded.*time",
+        "fix_cmd": "sed -i 's/--time=.*/--time=24:00:00/' {script}",
+        "description": "Job exceeded walltime — increase time limit",
+        "confidence": 0.90,
+    },
+    {
+        "error": r"Permission denied|EACCES",
+        "fix_cmd": "chmod +x {script}",
+        "description": "Permission denied on script/file",
+        "confidence": 0.85,
+    },
+]
+
+
+def pattern_check(error_text: str) -> Optional[dict]:
+    """Check if an error matches a known pattern. Returns fix info or None.
+
+    This is the LLM-free adaptive filter — avoids spending Devin tokens
+    on problems that have known solutions.
+
+    Returns:
+        dict with {pattern, fix_cmd, confidence, description} if match found
+        None if no pattern matches (escalate to Devin)
+    """
+    import re
+    for pattern in _PATTERN_LIBRARY:
+        if re.search(pattern["error"], error_text, re.IGNORECASE):
+            return {
+                "matched": True,
+                "pattern": pattern["error"],
+                "fix_cmd": pattern["fix_cmd"],
+                "confidence": pattern["confidence"],
+                "description": pattern["description"],
+            }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# fire_and_forget — T1 delegation (Devin initiates, Hermes executes + reports)
+# ---------------------------------------------------------------------------
+
+def fire_and_forget(
+    task: str,
+    report_to: str = "github",
+    monitor: bool = True,
+    auto_fix: bool = True,
+    task_id: Optional[str] = None,
+) -> str:
+    """Submit task to Hermes and return immediately. Zero follow-up tokens.
+
+    Hermes handles execution, monitoring, error recovery, and reporting.
+    Devin only sees results via git pull (0 additional tokens).
+
+    Args:
+        task: What to do (natural language or direct command)
+        report_to: Where to report ("github" = push to repo, "none" = silent)
+        monitor: If True, Hermes monitors until completion
+        auto_fix: If True, Hermes applies known patterns on failure
+        task_id: Optional tracking ID
+
+    Returns:
+        JSON with task acknowledgment and tracking info
+    """
+    _t0 = time.time()
+
+    # Build the autonomous instruction
+    instructions = [task]
+    if monitor:
+        instructions.append(
+            "Monitor this task until completion. "
+            "If it fails, check error against known patterns and auto-fix if confident."
+        )
+    if auto_fix:
+        instructions.append(
+            "Known fix patterns: libRlapack→LD_LIBRARY_PATH, OOM→increase mem, "
+            "convergence→increase starts, timeout→increase walltime."
+        )
+    if report_to == "github":
+        instructions.append(
+            "When complete, push a status summary to the repo via: "
+            "cd ~/work/xsdm_1000_sp && git pull && "
+            "echo 'STATUS: completed at $(date)' >> docs/status/auto_report.md && "
+            "git add -A && git commit -m 'auto: task completed' && git push"
+        )
+
+    full_task = " ".join(instructions)
+
+    # Use escalate_remote with minimal response expectation
+    result = escalate_remote(
+        task=full_task,
+        context="AUTONOMOUS MODE: Execute fully, report via GitHub, "
+                "only escalate back if truly stuck after 3 fix attempts.",
+        urgency="background",
+        response_format="compact",
+        max_tokens=100,  # We only need acknowledgment
+        task_id=task_id,
+    )
+
+    # Override tier to T1 (fire-and-forget)
+    if _CALL_LOG:
+        _CALL_LOG[-1]["tier"] = "T1"
+        _CALL_LOG[-1]["task_type"] = "fire_and_forget"
+
+    return result
+
+
+FIRE_AND_FORGET_SCHEMA = {
+    "name": "fire_and_forget",
+    "description": (
+        "Submit a task to Hermes and return immediately. Hermes handles "
+        "execution, monitoring, auto-fix on known errors, and reports "
+        "results via GitHub push. Devin spends ~100 tokens total. "
+        "Use for HPC jobs, builds, monitoring tasks — anything that "
+        "doesn't need real-time Devin reasoning."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "What Hermes should do autonomously.",
+            },
+            "report_to": {
+                "type": "string",
+                "enum": ["github", "none"],
+                "description": "Where to report completion. Default: github.",
+            },
+            "monitor": {
+                "type": "boolean",
+                "description": "Monitor until completion. Default: true.",
+            },
+            "auto_fix": {
+                "type": "boolean",
+                "description": "Auto-apply known fixes on failure. Default: true.",
+            },
+        },
+        "required": ["task"],
+    },
+}
+
+PATTERN_CHECK_SCHEMA = {
+    "name": "pattern_check",
+    "description": (
+        "Check if an error matches a known fix pattern. Returns the fix "
+        "command if matched (no LLM cost), or None if truly novel. "
+        "Use this BEFORE escalating errors to save tokens — if pattern "
+        "matches, just apply the fix directly."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "error_text": {
+                "type": "string",
+                "description": "The error message or log output to check.",
+            },
+        },
+        "required": ["error_text"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # Tool schemas (shared between register() and legacy registration)
 # ---------------------------------------------------------------------------
 
@@ -495,4 +686,34 @@ def register(ctx) -> None:
         check_fn=_check_slurm,
     )
 
-    logger.info("ecoseek plugin registered: 4 tools (escalate_remote, dialectical_exchange, eco_analyze, ku_hpc)")
+    # -- T1 delegation tools (Devin → fire-and-forget → Hermes autonomous) --
+
+    ctx.register_tool(
+        name="fire_and_forget",
+        toolset="ecoseek",
+        schema=FIRE_AND_FORGET_SCHEMA,
+        handler=lambda args, **kw: fire_and_forget(
+            task=args.get("task", ""),
+            report_to=args.get("report_to", "github"),
+            monitor=args.get("monitor", True),
+            auto_fix=args.get("auto_fix", True),
+            task_id=kw.get("task_id"),
+        ),
+        check_fn=_is_configured,
+    )
+
+    ctx.register_tool(
+        name="pattern_check",
+        toolset="ecoseek",
+        schema=PATTERN_CHECK_SCHEMA,
+        handler=lambda args, **kw: json.dumps(
+            pattern_check(args.get("error_text", "")) or {"matched": False}
+        ),
+        check_fn=lambda: True,  # No external dep needed
+    )
+
+    logger.info(
+        "ecoseek plugin registered: 6 tools "
+        "(escalate_remote, dialectical_exchange, eco_analyze, ku_hpc, "
+        "fire_and_forget, pattern_check)"
+    )
