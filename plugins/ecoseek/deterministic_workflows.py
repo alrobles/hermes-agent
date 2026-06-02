@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 _REMOTE_URL = os.environ.get("HERMES_REMOTE_URL", "https://hermes.ecoseek.org").rstrip("/")
+# API key for Hermes gateway. Supports both Authorization: Bearer <key> and
+# api-key: <key> headers. Set via HERMES_ECOSEEK_API_KEY env var or .env file.
+# Current key (reumanlab): API_SERVER_KEY in ~/.hermes/.env
 _API_KEY = os.environ.get("HERMES_ECOSEEK_API_KEY", "")
 _HPC_USER = "a474r867"
 
@@ -39,8 +42,10 @@ def _exec_raw(command: str, timeout: int = 30) -> tuple:
 
     # Strategy 1: Direct SSH from reumanlab (0 tokens)
     try:
+        ssh_key = os.path.expanduser("~/.ssh/hpc_a474r867_ed25519_new")
         result = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+            ["ssh", "-i", ssh_key, "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=accept-new",
              f"{_HPC_USER}@hpc.crc.ku.edu", command],
             capture_output=True, text=True, timeout=timeout
         )
@@ -52,16 +57,16 @@ def _exec_raw(command: str, timeout: int = 30) -> tuple:
 
     # Strategy 2: Cluster HTTP API (0 tokens)
     try:
-        api_body = json.dumps({"command": command}).encode("utf-8")
+        api_body = json.dumps({"cmd": command, "timeout": timeout}).encode("utf-8")
         api_req = urllib.request.Request(
-            "http://localhost:8888/exec",
+            "http://localhost:8888/task",
             data=api_body,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(api_req, timeout=timeout) as resp:
             api_data = json.loads(resp.read().decode("utf-8"))
-        return api_data.get("output", ""), {"completion_tokens": 0, "source": "cluster_api"}
+        return api_data.get("stdout", api_data.get("output", "")), {"completion_tokens": 0, "source": "cluster_api"}
     except Exception:
         pass
 
