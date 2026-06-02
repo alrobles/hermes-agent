@@ -47,6 +47,7 @@ SUPPORTED_ACTIONS = (
     "info",
     "account_usage",
     "raw",
+    "batch",
 )
 
 
@@ -371,6 +372,35 @@ def ku_hpc(
             "returncode": result["returncode"],
         })
 
+    # --- batch ---
+    elif action == "batch":
+        if not command:
+            return json.dumps({
+                "success": False,
+                "error": "missing_command",
+                "message": "The 'command' parameter is required for batch. "
+                           "Separate commands with '&&' or ';'.",
+            })
+        # Execute all commands in a single SSH session for efficiency
+        timeout = int(extra_args) if extra_args and extra_args.isdigit() else _SLURM_TIMEOUT * 3
+        if use_wrapper:
+            result = _run_via_wrapper(command, timeout=timeout)
+        else:
+            result = _run_cmd(["bash", "-c", command], timeout=timeout)
+
+        # Compact output: strip empty lines, limit to essential info
+        stdout_lines = [l for l in result["stdout"].splitlines() if l.strip()]
+        stderr_lines = [l for l in result["stderr"].splitlines() if l.strip()]
+
+        return json.dumps({
+            "success": result["returncode"] == 0,
+            "action": "batch",
+            "output": "\n".join(stdout_lines[-50:]),  # last 50 lines max
+            "stderr": "\n".join(stderr_lines[-20:]) if stderr_lines else "",
+            "returncode": result["returncode"],
+            "truncated": len(stdout_lines) > 50,
+        })
+
     return json.dumps({
         "success": False,
         "error": "unhandled_action",
@@ -401,7 +431,10 @@ KU_HPC_SCHEMA = {
                     "output: get job accounting (state, elapsed, memory). "
                     "info: list partitions, nodes, GPUs. "
                     "account_usage: recent job history (last 7 days). "
-                    "raw: run an arbitrary command on the cluster via SSH."
+                    "raw: run a single command on the cluster via SSH. "
+                    "batch: run multiple chained commands in ONE SSH session "
+                    "(saves round-trips; use '&&' or ';' to chain). "
+                    "Output auto-truncated to last 50 lines."
                 ),
             },
             "script": {
@@ -418,8 +451,11 @@ KU_HPC_SCHEMA = {
             "command": {
                 "type": "string",
                 "description": (
-                    "Shell command to run on the HPC cluster (for raw action). "
-                    "Examples: 'sinfo -p gpu', 'ls ~/scratch/', 'nvidia-smi'."
+                    "Shell command to run on the HPC cluster (for raw/batch action). "
+                    "For batch: chain commands with '&&' or ';' — all run in one SSH "
+                    "session. Output is auto-truncated to last 50 lines. "
+                    "Examples: 'sinfo -p gpu', 'ls ~/scratch/', "
+                    "'cd /work && git pull && sbatch job.sh && squeue -u a474r867'."
                 ),
             },
             "partition": {

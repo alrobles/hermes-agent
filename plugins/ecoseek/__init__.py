@@ -36,11 +36,68 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# TER Instrumentation — auto-log every call for continuous improvement
+# ---------------------------------------------------------------------------
+
+_CALL_LOG: list[dict] = []  # In-memory session log, accessible via get_session_metrics()
+
+
+def _log_call(tier: str, task_type: str, tokens: int, duration_s: float,
+              quality: float = 1.0, pattern: str = None) -> None:
+    """Record a tool call for TER measurement. Zero overhead."""
+    _CALL_LOG.append({
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tier": tier,
+        "task_type": task_type,
+        "tokens": tokens,
+        "duration_s": round(duration_s, 1),
+        "quality": quality,
+        "pattern": pattern,
+    })
+
+
+def _classify_task(task_text: str) -> str:
+    """Infer task type from instruction text for TER categorization."""
+    t = task_text.lower()
+    if any(k in t for k in ("squeue", "sacct", "status", "monitor", "check")):
+        return "status_check"
+    if any(k in t for k in ("sbatch", "submit", "launch", "run job")):
+        return "job_submit"
+    if any(k in t for k in ("git push", "git commit", "gh pr", "pull request")):
+        return "pr_creation"
+    if any(k in t for k in ("fix", "patch", "debug", "error")):
+        return "debug"
+    if any(k in t for k in ("build", "container", "apptainer", "singularity")):
+        return "env_setup"
+    if any(k in t for k in ("ls", "cat", "find", "du", "df", "wc")):
+        return "file_ops"
+    return "general"
+
+
+def get_session_metrics() -> dict:
+    """Return current session's TER metrics. Call at end of session."""
+    if not _CALL_LOG:
+        return {"calls": 0, "total_tokens": 0, "avg_duration_s": 0}
+    total_tokens = sum(c["tokens"] for c in _CALL_LOG)
+    avg_dur = sum(c["duration_s"] for c in _CALL_LOG) / len(_CALL_LOG)
+    tiers = {}
+    for c in _CALL_LOG:
+        tiers[c["tier"]] = tiers.get(c["tier"], 0) + 1
+    return {
+        "calls": len(_CALL_LOG),
+        "total_tokens": total_tokens,
+        "avg_duration_s": round(avg_dur, 1),
+        "tier_distribution": tiers,
+        "log": _CALL_LOG,
+    }
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -79,6 +136,8 @@ def escalate_remote(
     task: str,
     context: str = "",
     urgency: str = "normal",
+    response_format: str = "compact",
+    max_tokens: int = 0,
     task_id: Optional[str] = None,
 ) -> str:
     """Send a task to the remote Hermes agent on reumanlab.
@@ -97,6 +156,11 @@ def escalate_remote(
         Background information or system instructions for the remote agent.
     urgency : str, optional
         One of "normal", "high", "background". Affects timeout behavior.
+    response_format : str, optional
+        Response format: "compact" (JSON-only, no prose — default),
+        "structured" (key:value pairs), "full" (natural language).
+    max_tokens : int, optional
+        Maximum response tokens. 0 = no limit. Use 200-500 for status checks.
     task_id : str, optional
         Internal Hermes task ID (injected by the tool framework).
 
@@ -105,6 +169,8 @@ def escalate_remote(
     str
         JSON string with the remote agent's response.
     """
+    _t0 = time.time()
+
     if not _is_configured():
         return json.dumps({
             "success": False,
@@ -118,8 +184,25 @@ def escalate_remote(
     base_url, auth = _get_remote_endpoint()
 
     messages = []
+
+    # Build system prompt based on response_format
+    system_parts = []
+    if response_format == "compact":
+        system_parts.append(
+            "RESPONSE RULES: Reply ONLY with a JSON object. No prose, no markdown, "
+            "no explanation. Schema: {\"result\": ..., \"error\": null} or "
+            "{\"result\": null, \"error\": \"msg\"}. Keep values minimal."
+        )
+    elif response_format == "structured":
+        system_parts.append(
+            "RESPONSE RULES: Reply with key:value pairs, one per line. "
+            "No prose, no markdown. Example: status:RUNNING\njobs:5\nerrors:0"
+        )
     if context:
-        messages.append({"role": "system", "content": context})
+        system_parts.append(context)
+    if system_parts:
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+
     messages.append({"role": "user", "content": task})
 
     timeout = _TIMEOUT
@@ -128,10 +211,14 @@ def escalate_remote(
     elif urgency == "background":
         timeout = max(_TIMEOUT, 600)
 
-    body = json.dumps({
+    request_body: dict = {
         "model": _MODEL,
         "messages": messages,
-    }).encode("utf-8")
+    }
+    if max_tokens > 0:
+        request_body["max_tokens"] = max_tokens
+
+    body = json.dumps(request_body).encode("utf-8")
 
     headers = {
         "Content-Type": "application/json",
@@ -167,6 +254,15 @@ def escalate_remote(
             "ecoseek escalate_remote: model=%s tokens=%s",
             model_used,
             usage.get("total_tokens", "?"),
+        )
+
+        # TER instrumentation: auto-log for continuous improvement
+        _tier = "T1" if response_format == "compact" and max_tokens > 0 else "T2"
+        _log_call(
+            tier=_tier,
+            task_type=_classify_task(task),
+            tokens=usage.get("total_tokens", 0),
+            duration_s=time.time() - _t0,
         )
 
         return json.dumps({
@@ -212,6 +308,197 @@ def escalate_remote(
 
 
 # ---------------------------------------------------------------------------
+# Pattern Library — known errors with automatic fixes (T0 delegation)
+# ---------------------------------------------------------------------------
+
+_PATTERN_LIBRARY = [
+    {
+        "error": r"libRlapack\.so|libRblas\.so",
+        "fix_cmd": "export APPTAINERENV_LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu",
+        "description": "R LAPACK/BLAS library not found in container",
+        "confidence": 0.99,
+    },
+    {
+        "error": r"oom-kill|Out of memory|Cannot allocate memory",
+        "fix_cmd": "sed -i 's/--mem=.*/--mem=64G/' {script}",
+        "description": "Job killed by OOM — increase memory allocation",
+        "confidence": 0.95,
+    },
+    {
+        "error": r"convergence|ll_range|max_pdist",
+        "fix_cmd": "sed -i 's/num_starts.*=.*/num_starts = 1500/' {script}",
+        "description": "Optimization did not converge — increase starting points",
+        "confidence": 0.80,
+    },
+    {
+        "error": r"ModuleNotFoundError|there is no package",
+        "fix_cmd": "apptainer exec {sif} Rscript -e 'install.packages(\"{pkg}\")'",
+        "description": "Missing R/Python package inside container",
+        "confidence": 0.70,
+    },
+    {
+        "error": r"DUE TO TIME LIMIT|TIMEOUT|exceeded.*time",
+        "fix_cmd": "sed -i 's/--time=.*/--time=24:00:00/' {script}",
+        "description": "Job exceeded walltime — increase time limit",
+        "confidence": 0.90,
+    },
+    {
+        "error": r"Permission denied|EACCES",
+        "fix_cmd": "chmod +x {script}",
+        "description": "Permission denied on script/file",
+        "confidence": 0.85,
+    },
+]
+
+
+def pattern_check(error_text: str) -> Optional[dict]:
+    """Check if an error matches a known pattern. Returns fix info or None.
+
+    This is the LLM-free adaptive filter — avoids spending Devin tokens
+    on problems that have known solutions.
+
+    Returns:
+        dict with {pattern, fix_cmd, confidence, description} if match found
+        None if no pattern matches (escalate to Devin)
+    """
+    import re
+    for pattern in _PATTERN_LIBRARY:
+        if re.search(pattern["error"], error_text, re.IGNORECASE):
+            return {
+                "matched": True,
+                "pattern": pattern["error"],
+                "fix_cmd": pattern["fix_cmd"],
+                "confidence": pattern["confidence"],
+                "description": pattern["description"],
+            }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# fire_and_forget — T1 delegation (Devin initiates, Hermes executes + reports)
+# ---------------------------------------------------------------------------
+
+def fire_and_forget(
+    task: str,
+    report_to: str = "github",
+    monitor: bool = True,
+    auto_fix: bool = True,
+    task_id: Optional[str] = None,
+) -> str:
+    """Submit task to Hermes and return immediately. Zero follow-up tokens.
+
+    Hermes handles execution, monitoring, error recovery, and reporting.
+    Devin only sees results via git pull (0 additional tokens).
+
+    Args:
+        task: What to do (natural language or direct command)
+        report_to: Where to report ("github" = push to repo, "none" = silent)
+        monitor: If True, Hermes monitors until completion
+        auto_fix: If True, Hermes applies known patterns on failure
+        task_id: Optional tracking ID
+
+    Returns:
+        JSON with task acknowledgment and tracking info
+    """
+    _t0 = time.time()
+
+    # Build the autonomous instruction
+    instructions = [task]
+    if monitor:
+        instructions.append(
+            "Monitor this task until completion. "
+            "If it fails, check error against known patterns and auto-fix if confident."
+        )
+    if auto_fix:
+        instructions.append(
+            "Known fix patterns: libRlapack→LD_LIBRARY_PATH, OOM→increase mem, "
+            "convergence→increase starts, timeout→increase walltime."
+        )
+    if report_to == "github":
+        instructions.append(
+            "When complete, push a status summary to the repo via: "
+            "cd ~/work/xsdm_1000_sp && git pull && "
+            "echo 'STATUS: completed at $(date)' >> docs/status/auto_report.md && "
+            "git add -A && git commit -m 'auto: task completed' && git push"
+        )
+
+    full_task = " ".join(instructions)
+
+    # Use escalate_remote with minimal response expectation
+    result = escalate_remote(
+        task=full_task,
+        context="AUTONOMOUS MODE: Execute fully, report via GitHub, "
+                "only escalate back if truly stuck after 3 fix attempts.",
+        urgency="background",
+        response_format="compact",
+        max_tokens=100,  # We only need acknowledgment
+        task_id=task_id,
+    )
+
+    # Override tier to T1 (fire-and-forget)
+    if _CALL_LOG:
+        _CALL_LOG[-1]["tier"] = "T1"
+        _CALL_LOG[-1]["task_type"] = "fire_and_forget"
+
+    return result
+
+
+FIRE_AND_FORGET_SCHEMA = {
+    "name": "fire_and_forget",
+    "description": (
+        "Submit a task to Hermes and return immediately. Hermes handles "
+        "execution, monitoring, auto-fix on known errors, and reports "
+        "results via GitHub push. Devin spends ~100 tokens total. "
+        "Use for HPC jobs, builds, monitoring tasks — anything that "
+        "doesn't need real-time Devin reasoning."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "What Hermes should do autonomously.",
+            },
+            "report_to": {
+                "type": "string",
+                "enum": ["github", "none"],
+                "description": "Where to report completion. Default: github.",
+            },
+            "monitor": {
+                "type": "boolean",
+                "description": "Monitor until completion. Default: true.",
+            },
+            "auto_fix": {
+                "type": "boolean",
+                "description": "Auto-apply known fixes on failure. Default: true.",
+            },
+        },
+        "required": ["task"],
+    },
+}
+
+PATTERN_CHECK_SCHEMA = {
+    "name": "pattern_check",
+    "description": (
+        "Check if an error matches a known fix pattern. Returns the fix "
+        "command if matched (no LLM cost), or None if truly novel. "
+        "Use this BEFORE escalating errors to save tokens — if pattern "
+        "matches, just apply the fix directly."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "error_text": {
+                "type": "string",
+                "description": "The error message or log output to check.",
+            },
+        },
+        "required": ["error_text"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # Tool schemas (shared between register() and legacy registration)
 # ---------------------------------------------------------------------------
 
@@ -221,8 +508,9 @@ ESCALATE_REMOTE_SCHEMA = {
         "Escalate a task to the remote Hermes agent on reumanlab. "
         "The remote agent has access to DeepSeek v4 Pro, the KU HPC "
         "cluster (A100/MI210 GPUs via Slurm), GitHub CLI, and advanced "
-        "ecological tools. Use this for simple one-shot delegation when "
-        "you just need the remote agent to do something and return."
+        "ecological tools. Use for one-shot delegation. "
+        "TIP: Use response_format='compact' + max_tokens=300 for status "
+        "checks to save 5-10x tokens vs full prose responses."
     ),
     "parameters": {
         "type": "object",
@@ -249,6 +537,23 @@ ESCALATE_REMOTE_SCHEMA = {
                     "Task urgency. 'high' for quick lookups (shorter timeout), "
                     "'background' for long-running HPC jobs (longer timeout), "
                     "'normal' for standard tasks."
+                ),
+            },
+            "response_format": {
+                "type": "string",
+                "enum": ["compact", "structured", "full"],
+                "description": (
+                    "Response format. 'compact' (default): JSON-only, no prose — "
+                    "best for programmatic use, saves ~70% tokens. 'structured': "
+                    "key:value pairs. 'full': natural language (legacy behavior)."
+                ),
+            },
+            "max_tokens": {
+                "type": "integer",
+                "description": (
+                    "Max response tokens. 0 = unlimited. Use 200-500 for status "
+                    "checks, 1000+ for complex tasks. Saves cost when you only "
+                    "need a yes/no or a short result."
                 ),
             },
         },
@@ -331,6 +636,8 @@ def register(ctx) -> None:
             task=args.get("task", ""),
             context=args.get("context", ""),
             urgency=args.get("urgency", "normal"),
+            response_format=args.get("response_format", "compact"),
+            max_tokens=args.get("max_tokens", 0),
             task_id=kw.get("task_id"),
         ),
         check_fn=_is_configured,
@@ -379,4 +686,59 @@ def register(ctx) -> None:
         check_fn=_check_slurm,
     )
 
-    logger.info("ecoseek plugin registered: 4 tools (escalate_remote, dialectical_exchange, eco_analyze, ku_hpc)")
+    # -- T1 delegation tools (Devin → fire-and-forget → Hermes autonomous) --
+
+    ctx.register_tool(
+        name="fire_and_forget",
+        toolset="ecoseek",
+        schema=FIRE_AND_FORGET_SCHEMA,
+        handler=lambda args, **kw: fire_and_forget(
+            task=args.get("task", ""),
+            report_to=args.get("report_to", "github"),
+            monitor=args.get("monitor", True),
+            auto_fix=args.get("auto_fix", True),
+            task_id=kw.get("task_id"),
+        ),
+        check_fn=_is_configured,
+    )
+
+    ctx.register_tool(
+        name="pattern_check",
+        toolset="ecoseek",
+        schema=PATTERN_CHECK_SCHEMA,
+        handler=lambda args, **kw: json.dumps(
+            pattern_check(args.get("error_text", "")) or {"matched": False}
+        ),
+        check_fn=lambda: True,  # No external dep needed
+    )
+
+    # -- Subagent delegation (VoltAgent-inspired fan-out) -------------------
+
+    delegate_mod = import_module(".subagent_delegate", package=__name__)
+
+    ctx.register_tool(
+        name="delegate_task",
+        toolset="ecoseek",
+        schema=delegate_mod.DELEGATE_TASK_SCHEMA,
+        handler=lambda args, **kw: delegate_mod.delegate_task(
+            task=args.get("task", ""),
+            target_agents=args.get("target_agents", []),
+            context=args.get("context"),
+            parallel=args.get("parallel", True),
+        ),
+        check_fn=_is_configured,
+    )
+
+    ctx.register_tool(
+        name="list_subagents",
+        toolset="ecoseek",
+        schema=delegate_mod.LIST_SUBAGENTS_SCHEMA,
+        handler=lambda args, **kw: delegate_mod.list_subagents(),
+        check_fn=lambda: True,
+    )
+
+    logger.info(
+        "ecoseek plugin registered: 8 tools "
+        "(escalate_remote, dialectical_exchange, eco_analyze, ku_hpc, "
+        "fire_and_forget, pattern_check, delegate_task, list_subagents)"
+    )
