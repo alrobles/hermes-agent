@@ -36,11 +36,68 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# TER Instrumentation — auto-log every call for continuous improvement
+# ---------------------------------------------------------------------------
+
+_CALL_LOG: list[dict] = []  # In-memory session log, accessible via get_session_metrics()
+
+
+def _log_call(tier: str, task_type: str, tokens: int, duration_s: float,
+              quality: float = 1.0, pattern: str = None) -> None:
+    """Record a tool call for TER measurement. Zero overhead."""
+    _CALL_LOG.append({
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tier": tier,
+        "task_type": task_type,
+        "tokens": tokens,
+        "duration_s": round(duration_s, 1),
+        "quality": quality,
+        "pattern": pattern,
+    })
+
+
+def _classify_task(task_text: str) -> str:
+    """Infer task type from instruction text for TER categorization."""
+    t = task_text.lower()
+    if any(k in t for k in ("squeue", "sacct", "status", "monitor", "check")):
+        return "status_check"
+    if any(k in t for k in ("sbatch", "submit", "launch", "run job")):
+        return "job_submit"
+    if any(k in t for k in ("git push", "git commit", "gh pr", "pull request")):
+        return "pr_creation"
+    if any(k in t for k in ("fix", "patch", "debug", "error")):
+        return "debug"
+    if any(k in t for k in ("build", "container", "apptainer", "singularity")):
+        return "env_setup"
+    if any(k in t for k in ("ls", "cat", "find", "du", "df", "wc")):
+        return "file_ops"
+    return "general"
+
+
+def get_session_metrics() -> dict:
+    """Return current session's TER metrics. Call at end of session."""
+    if not _CALL_LOG:
+        return {"calls": 0, "total_tokens": 0, "avg_duration_s": 0}
+    total_tokens = sum(c["tokens"] for c in _CALL_LOG)
+    avg_dur = sum(c["duration_s"] for c in _CALL_LOG) / len(_CALL_LOG)
+    tiers = {}
+    for c in _CALL_LOG:
+        tiers[c["tier"]] = tiers.get(c["tier"], 0) + 1
+    return {
+        "calls": len(_CALL_LOG),
+        "total_tokens": total_tokens,
+        "avg_duration_s": round(avg_dur, 1),
+        "tier_distribution": tiers,
+        "log": _CALL_LOG,
+    }
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -112,6 +169,8 @@ def escalate_remote(
     str
         JSON string with the remote agent's response.
     """
+    _t0 = time.time()
+
     if not _is_configured():
         return json.dumps({
             "success": False,
@@ -195,6 +254,15 @@ def escalate_remote(
             "ecoseek escalate_remote: model=%s tokens=%s",
             model_used,
             usage.get("total_tokens", "?"),
+        )
+
+        # TER instrumentation: auto-log for continuous improvement
+        _tier = "T1" if response_format == "compact" and max_tokens > 0 else "T2"
+        _log_call(
+            tier=_tier,
+            task_type=_classify_task(task),
+            tokens=usage.get("total_tokens", 0),
+            duration_s=time.time() - _t0,
         )
 
         return json.dumps({
