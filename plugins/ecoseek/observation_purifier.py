@@ -31,8 +31,11 @@ _NOISE_PATTERNS = [
     # pip install verbose output (already installed)
     re.compile(r"^Requirement already satisfied:.*$", re.MULTILINE),
     # R package compilation noise (gcc/g++ lines)
-    re.compile(r"^g?cc\s.*-o\s.*\.o.*$", re.MULTILINE),
-    re.compile(r"^g\+\+\s.*-o\s.*\.o.*$", re.MULTILINE),
+    re.compile(r"^g?cc\s.*-[co]\s.*$", re.MULTILINE),
+    re.compile(r"^g\+\+\s.*-[co]\s.*$", re.MULTILINE),
+    # R build verbose lines (** byte-compile, installing to, etc.)
+    re.compile(r"^\*\*\s.*$", re.MULTILINE),
+    re.compile(r"^installing to /.*$", re.MULTILINE),
     # git clone/fetch progress
     re.compile(r"^(Cloning|Receiving|Resolving|Counting|Compressing).*\d+%.*$", re.MULTILINE),
     # Remote/origin lines in git output
@@ -174,9 +177,9 @@ def purify_hermes_response(response: str, task_type: str = "general") -> str:
 
     # Remove common LLM preambles
     preambles = [
-        r"^(?:Sure|Of course|Certainly|I'll|Let me|Here's|Here is)[^.]*\.\s*",
-        r"^(?:Based on|According to|Looking at)[^.]*\.\s*",
-        r"^(?:The (?:output|result|response|command) shows)[^.]*[.:]\s*",
+        r"^(?:Sure|Of course|Certainly|I'll|Let me|Here's|Here is)[^\n]*(?:\.|:|!)\s*\n*",
+        r"^(?:Based on|According to|Looking at)[^\n]*(?:\.|:|!)\s*\n*",
+        r"^(?:The (?:output|result|response|command) shows)[^\n]*[.:]\s*\n*",
     ]
     text = stripped
     for p in preambles:

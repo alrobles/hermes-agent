@@ -39,9 +39,14 @@ def _exec_raw(command: str, timeout: int = 30) -> tuple:
 
     # Strategy 1: Direct SSH from reumanlab (0 tokens)
     try:
+        ssh_key = os.path.expanduser("~/.ssh/hpc_a474r867_ed25519_new")
+        ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+                   f"{_HPC_USER}@hpc.crc.ku.edu", command]
+        if os.path.exists(ssh_key):
+            ssh_cmd.insert(1, "-i")
+            ssh_cmd.insert(2, ssh_key)
         result = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
-             f"{_HPC_USER}@hpc.crc.ku.edu", command],
+            ssh_cmd,
             capture_output=True, text=True, timeout=timeout
         )
         if result.returncode == 0 or result.stdout:
@@ -50,11 +55,13 @@ def _exec_raw(command: str, timeout: int = 30) -> tuple:
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
 
-    # Strategy 2: Cluster HTTP API (0 tokens)
+    # Strategy 2: Cluster HTTP API at r10r18n02:8888 (0 tokens)
+    # Endpoint: POST /task with {"cmd": ..., "timeout": ...}
+    # Also accepts Authorization: Bearer OR api-key header (both valid)
     try:
-        api_body = json.dumps({"command": command}).encode("utf-8")
+        api_body = json.dumps({"cmd": command, "timeout": timeout}).encode("utf-8")
         api_req = urllib.request.Request(
-            "http://localhost:8888/exec",
+            "http://localhost:8888/task",
             data=api_body,
             headers={"Content-Type": "application/json"},
             method="POST",
