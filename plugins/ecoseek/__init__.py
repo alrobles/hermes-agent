@@ -257,13 +257,34 @@ def escalate_remote(
         )
 
         # TER instrumentation: auto-log for continuous improvement
+        _task_type = _classify_task(task)
         _tier = "T1" if response_format == "compact" and max_tokens > 0 else "T2"
+        _tokens = usage.get("total_tokens", 0)
+        _duration = time.time() - _t0
         _log_call(
             tier=_tier,
-            task_type=_classify_task(task),
-            tokens=usage.get("total_tokens", 0),
-            duration_s=time.time() - _t0,
+            task_type=_task_type,
+            tokens=_tokens,
+            duration_s=_duration,
         )
+
+        # Phoenix optimizer: record outcome + export span
+        try:
+            from .phoenix_optimizer import (
+                record_task_outcome, record_token_usage, export_span_to_phoenix
+            )
+            record_task_outcome(_task_type, _tier, success=True)
+            record_token_usage(_task_type, usage.get("completion_tokens", 0))
+            export_span_to_phoenix(
+                name="escalate_remote",
+                tier=_tier,
+                task_type=_task_type,
+                tokens=_tokens,
+                duration_s=_duration,
+                metadata={"model": model_used, "format": response_format},
+            )
+        except Exception:
+            pass  # Non-blocking — optimizer is best-effort
 
         return json.dumps({
             "success": True,
@@ -737,8 +758,36 @@ def register(ctx) -> None:
         check_fn=lambda: True,
     )
 
+    # -- Phoenix optimizer (trace-driven continuous improvement) -------------
+
+    phoenix_mod = import_module(".phoenix_optimizer", package=__name__)
+
+    ctx.register_tool(
+        name="optimization_report",
+        toolset="ecoseek",
+        schema=phoenix_mod.OPTIMIZATION_REPORT_SCHEMA,
+        handler=lambda args, **kw: json.dumps(
+            phoenix_mod.get_session_optimization_report(), indent=2
+        ),
+        check_fn=lambda: True,
+    )
+
+    ctx.register_tool(
+        name="optimize_call",
+        toolset="ecoseek",
+        schema=phoenix_mod.OPTIMIZE_CALL_SCHEMA,
+        handler=lambda args, **kw: json.dumps(
+            phoenix_mod.get_optimization_advice(
+                task_type=args.get("task_type", "general"),
+                error_text=args.get("error_text", ""),
+            )
+        ),
+        check_fn=lambda: True,
+    )
+
     logger.info(
-        "ecoseek plugin registered: 8 tools "
+        "ecoseek plugin registered: 10 tools "
         "(escalate_remote, dialectical_exchange, eco_analyze, ku_hpc, "
-        "fire_and_forget, pattern_check, delegate_task, list_subagents)"
+        "fire_and_forget, pattern_check, delegate_task, list_subagents, "
+        "optimization_report, optimize_call)"
     )
