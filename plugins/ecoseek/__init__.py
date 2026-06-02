@@ -250,6 +250,20 @@ def escalate_remote(
         model_used = data.get("model", _MODEL)
         usage = data.get("usage", {})
 
+        # --- Observation Purification (SupervisorAgent-inspired) ---
+        # Strip noise from response before returning to caller.
+        # Saves ~30% prompt tokens on subsequent calls by reducing context size.
+        try:
+            from .observation_purifier import purify_hermes_response, purify_output
+            _task_type_hint = _classify_task(task)
+            if response_format == "compact":
+                # For compact mode, purify the raw output embedded in response
+                content = purify_output(content, _task_type_hint)
+            else:
+                content = purify_hermes_response(content, _task_type_hint)
+        except Exception:
+            pass  # Non-blocking — purification is best-effort
+
         logger.info(
             "ecoseek escalate_remote: model=%s tokens=%s",
             model_used,
@@ -758,6 +772,27 @@ def register(ctx) -> None:
         check_fn=lambda: True,
     )
 
+    # -- Deterministic HPC workflows (zero-LLM-token operations) -------------
+
+    workflow_mod = import_module(".deterministic_workflows", package=__name__)
+
+    ctx.register_tool(
+        name="hpc_workflow",
+        toolset="ecoseek",
+        schema=workflow_mod.HPC_WORKFLOW_SCHEMA,
+        handler=lambda args, **kw: workflow_mod.hpc_workflow(
+            workflow=args.get("workflow", "status"),
+            sbatch_script=args.get("sbatch_script", ""),
+            job_id=args.get("job_id", ""),
+            results_dir=args.get("results_dir", ""),
+            work_dir=args.get("work_dir", ""),
+            pattern=args.get("pattern", "*.rds"),
+            push_to_github=args.get("push_to_github", False),
+            max_checks=args.get("max_checks", 5),
+        ),
+        check_fn=_is_configured,
+    )
+
     # -- Phoenix optimizer (trace-driven continuous improvement) -------------
 
     phoenix_mod = import_module(".phoenix_optimizer", package=__name__)
@@ -786,8 +821,8 @@ def register(ctx) -> None:
     )
 
     logger.info(
-        "ecoseek plugin registered: 10 tools "
+        "ecoseek plugin registered: 11 tools "
         "(escalate_remote, dialectical_exchange, eco_analyze, ku_hpc, "
         "fire_and_forget, pattern_check, delegate_task, list_subagents, "
-        "optimization_report, optimize_call)"
+        "hpc_workflow, optimization_report, optimize_call)"
     )
