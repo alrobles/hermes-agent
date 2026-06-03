@@ -31,6 +31,8 @@ from typing import Dict, List, Any, Set, Optional, Tuple
 _HERMES_CORE_TOOLS = [
     # Web
     "web_search", "web_extract",
+    # Perplexity research (gated on PERPLEXITY_API_KEY via check_fn)
+    "perplexity_ask",
     # Terminal + process management
     "terminal", "process",
     # NOTE: the desktop GUI affordances (read_terminal, open_preview, …) are
@@ -108,8 +110,14 @@ TOOLSETS = {
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",
-        "tools": ["web_search", "web_extract"],
+        "tools": ["web_search", "web_extract", "perplexity_ask"],
         "includes": []  # No other toolsets included
+    },
+    
+    "research": {
+        "description": "AI-powered deep research tool using Perplexity — searches the web and returns citation-backed answers. Ideal for fact-checking, academic queries, and current-events research.",
+        "tools": ["perplexity_ask"],
+        "includes": []
     },
     
     "search": {
