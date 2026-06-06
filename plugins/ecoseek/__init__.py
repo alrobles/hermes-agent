@@ -820,17 +820,17 @@ def register(ctx) -> None:
         check_fn=lambda: True,
     )
 
-    # -- Hypothesis Tournament (Phase 4 — Co-Scientist inspired) -------------
+    # -- DiDAL Hypothesis Protocol (Phase 4 — dialectical thesis refinement) --
 
     hypo_mod = import_module(".hypothesis_engine", package=__name__)
 
     ctx.register_tool(
-        name="hypothesis_tournament",
+        name="dialectical_hypothesis",
         toolset="ecoseek",
-        schema=hypo_mod.HYPOTHESIS_TOURNAMENT_SCHEMA,
-        handler=lambda args, **kw: hypo_mod.hypothesis_tournament(
+        schema=hypo_mod.DIALECTICAL_HYPOTHESIS_SCHEMA,
+        handler=lambda args, **kw: hypo_mod.dialectical_hypothesis_refinement(
             question=args.get("question", ""),
-            n_hypotheses=args.get("n_hypotheses", 5),
+            n_theses=args.get("n_theses", 5),
             n_rounds=args.get("n_rounds", 3),
             domain=args.get("domain", "ecology"),
             context=args.get("context", ""),
@@ -846,5 +846,5 @@ def register(ctx) -> None:
         "ecoseek plugin registered: 12 tools "
         "(escalate_remote, dialectical_exchange, eco_analyze, ku_hpc, "
         "fire_and_forget, pattern_check, delegate_task, list_subagents, "
-        "hpc_workflow, optimization_report, optimize_call, hypothesis_tournament)"
+        "hpc_workflow, optimization_report, optimize_call, dialectical_hypothesis)"
     )

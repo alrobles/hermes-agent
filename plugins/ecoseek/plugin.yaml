@@ -1,10 +1,12 @@
 name: ecoseek
 version: "0.7.0"
 description: >
-  EcoSeek Phase 4 — Hypothesis Tournament (Co-Scientist inspired).
-  Multi-agent Elo-ranked debate between ecological hypotheses with
-  Generation → Tournament → Meta-Review → Research Proposal pipeline.
-  Alpha tools: escalate_remote, dialectical_exchange, hypothesis_tournament.
+  EcoSeek Phase 4 — DiDAL Hypothesis Protocol.
+  Dialectical thesis refinement: THESIS (Alpha generates) →
+  ANTITHESIS (Beta challenges) → SYNTHESIS (Alpha weaves into
+  research program). Hegelian dialectics applied to ecological
+  hypothesis testing. Not a tournament — dialectical science.
+  Alpha tools: escalate_remote, dialectical_exchange, dialectical_hypothesis.
   Beta tools: eco_analyze, ku_hpc.
   T1 tools: fire_and_forget, pattern_check, delegate_task, hpc_workflow.
   Enable via `hermes plugins enable ecoseek`.

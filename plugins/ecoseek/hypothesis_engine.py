@@ -1,17 +1,27 @@
-"""Hypothesis Engine — Phase 4 of EcoSeek DiDAL.
+"""DiDAL Hypothesis Protocol — Phase 4 of EcoSeek.
 
-Extends the dual-agent DiDAL protocol into a multi-agent hypothesis tournament
-inspired by Google DeepMind's Co-Scientist (Nature 2026).
+Extends the DiDAL (Dialectical Dual-Agent Loop) from binary debate into
+a dialectical hypothesis refinement protocol rooted in Hegelian dialectics:
 
-Architecture:
-  Phase 1: GENERATE — GenerationAgent proposes N hypotheses from literature + data
-  Phase 2: TOURNAMENT — Elo-ranked debate matches between hypotheses
-  Phase 3: META-REVIEW — MetaReviewAgent synthesizes ranked proposal
+  THESIS → ANTITHESIS → SYNTHESIS
 
-Model tiering:
-  - Generation + MetaReview: deepseek (high quality, paid)
-  - Debate matches: EcoCoder local via ollama (GPU, free)
-  - Ranking: lightweight LLM call or heuristic
+Alpha (Emily, the ecologist) proposes hypotheses (thesis).
+Beta (the remote executor/critic) challenges them with evidence (antithesis).
+The dialectical clash produces refined, stronger hypotheses (synthesis).
+
+This is NOT a sports tournament. This is dialectical science — hypotheses
+are strengthened through structured critique, not eliminated by ranking.
+Elo ratings are an internal metric; the output is a synthesized research
+program, not a leaderboard.
+
+Phases:
+  1. THESIS — Alpha generates N hypotheses from literature + ecological data
+  2. DIALECTIC — Each hypothesis faces Beta's critique; clash produces refinement
+  3. SYNTHESIS — The refined hypotheses are woven into a coherent research proposal
+
+Model tiering (DiDAL philosophy: Alpha thinks, Beta executes):
+  - Alpha (thesis generation + synthesis): DeepSeek (deep ecological reasoning)
+  - Beta (dialectical critique): EcoCoder local via ollama GPU (fast, free iteration)
 """
 
 from __future__ import annotations
@@ -28,52 +38,61 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Elo Rating System
+# Dialectical Strength (internal metric — not exposed as "ranking")
 # ---------------------------------------------------------------------------
 
-DEFAULT_ELO = 1200
-ELO_K_FACTOR = 32
+DEFAULT_STRENGTH = 1200  # Initial dialectical strength (internal Elo)
+K_FACTOR = 32            # How much a single dialectical clash shifts strength
 
 
-def expected_score(rating_a: float, rating_b: float) -> float:
-    """Probability that A beats B given their Elo ratings."""
-    return 1.0 / (1.0 + math.pow(10, (rating_b - rating_a) / 400.0))
+def expected_outcome(strength_a: float, strength_b: float) -> float:
+    """Probability that thesis A withstands antithesis B in dialectical clash."""
+    return 1.0 / (1.0 + math.pow(10, (strength_b - strength_a) / 400.0))
 
 
-def update_elo(
-    winner_rating: float,
-    loser_rating: float,
-    k: int = ELO_K_FACTOR,
+def update_dialectical_strength(
+    prevailing: float,
+    challenged: float,
+    k: int = K_FACTOR,
 ) -> tuple[float, float]:
-    """Return (new_winner_rating, new_loser_rating) after a match."""
-    expected_win = expected_score(winner_rating, loser_rating)
-    delta = k * (1.0 - expected_win)
+    """Return (new_prevailing, new_challenged) after a dialectical round.
+
+    The prevailing hypothesis gains strength; the challenged one learns
+    from the encounter and may come back stronger in the next round.
+    """
+    expected = expected_outcome(prevailing, challenged)
+    delta = k * (1.0 - expected)
     return (
-        round(winner_rating + delta, 1),
-        round(loser_rating - delta, 1),
+        round(prevailing + delta, 1),
+        round(challenged - delta, 1),
     )
 
 
 # ---------------------------------------------------------------------------
-# Hypothesis Dataclass
+# Hypothesis (a thesis in the DiDAL protocol)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class Hypothesis:
-    """A testable ecological hypothesis with tournament state."""
+    """A testable ecological thesis within the DiDAL dialectical protocol.
+
+    Each hypothesis passes through: thesis → antithesis (Beta critique) →
+    synthesis (refined version). The dialectical_strength tracks how well
+    it has withstood critique across rounds.
+    """
 
     id: str
     statement: str
     rationale: str
     predictions: list[str] = field(default_factory=list)
-    testability: float = 0.5  # 0..1 how easily testable
-    novelty: float = 0.5       # 0..1 how novel
-    confidence: float = 0.5     # 0..1 initial confidence
-    elo: float = DEFAULT_ELO
-    generation: int = 1          # generation number (1 = original, 2+ = evolved)
-    parent_id: Optional[str] = None  # id of parent hypothesis (if evolved)
-    round_history: list[dict] = field(default_factory=list)
+    testability: float = 0.5     # 0..1
+    novelty: float = 0.5          # 0..1
+    confidence: float = 0.5       # 0..1
+    dialectical_strength: float = DEFAULT_STRENGTH  # Internal metric
+    refinement_round: int = 1     # 1 = original thesis, 2+ = synthesized
+    parent_id: Optional[str] = None  # id of the thesis this was synthesized from
+    critique_history: list[dict] = field(default_factory=list)
     evidence_sources: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -85,8 +104,8 @@ class Hypothesis:
             "testability": self.testability,
             "novelty": self.novelty,
             "confidence": self.confidence,
-            "elo": self.elo,
-            "generation": self.generation,
+            "dialectical_strength": self.dialectical_strength,
+            "refinement_round": self.refinement_round,
             "parent_id": self.parent_id,
             "evidence_sources": self.evidence_sources,
         }
@@ -101,37 +120,37 @@ class Hypothesis:
             testability=d.get("testability", 0.5),
             novelty=d.get("novelty", 0.5),
             confidence=d.get("confidence", 0.5),
-            elo=d.get("elo", DEFAULT_ELO),
-            generation=d.get("generation", 1),
+            dialectical_strength=d.get("dialectical_strength", DEFAULT_STRENGTH),
+            refinement_round=d.get("refinement_round", 1),
             parent_id=d.get("parent_id"),
             evidence_sources=d.get("evidence_sources", []),
         )
 
 
 # ---------------------------------------------------------------------------
-# Generation Agent
+# Phase 1: THESIS — Alpha generates hypotheses
 # ---------------------------------------------------------------------------
 
-GENERATION_SYSTEM_PROMPT = """\
-You are a senior ecologist specialized in hypothesis generation.
-Your task is to generate diverse, testable, and novel ecological hypotheses
-for a given research question.
+THESIS_SYSTEM_PROMPT = """\
+You are Alpha, the senior ecologist in the EcoSeek DiDAL (Dialectical Dual-Agent
+Loop) system. Your role is to propose testable ecological theses (hypotheses)
+that will be challenged by Beta, your dialectical counterpart.
 
-For each hypothesis, provide:
-1. A clear, falsifiable statement
-2. Ecological rationale (why this might be true)
-3. Specific, measurable predictions
-4. Testability score (0-1)
-5. Novelty score (0-1)
-6. Initial confidence score (0-1)
+For each thesis, provide:
+1. A clear, falsifiable statement (the thesis)
+2. Ecological rationale — why this might be true, grounded in theory
+3. Specific, measurable predictions that follow from the thesis
+4. Testability score (0-1): how easily can Beta verify this with available data?
+5. Novelty score (0-1): does this challenge existing paradigms?
+6. Initial confidence (0-1): your prior belief before dialectical testing
 
-Rules:
-- Generate HYPOTHESES that are DIVERSE — cover different mechanisms, scales, taxa
-- Each hypothesis MUST be falsifiable with available data (GBIF, SDM, climate)
-- Prefer specific over vague (e.g., "Andean hummingbirds above 3000m" not "high-altitude birds")
-- Novelty > 0.7 means the hypothesis challenges existing paradigms
+DiDAL principles:
+- Each thesis must be FALSIFIABLE — Beta needs something concrete to critique
+- Generate DIVERSE theses covering different mechanisms, scales, and taxa
+- Favor ECOLOGICAL SPECIFICITY over vagueness
+- A thesis that survives Beta's critique is stronger than one that was never tested
 
-Output format: JSON array of hypothesis objects.
+Output format: JSON array of thesis objects.
 ```json
 [
   {
@@ -147,9 +166,9 @@ Output format: JSON array of hypothesis objects.
 """
 
 
-def _parse_hypotheses_json(raw: str, n_expected: int = 5) -> list[dict]:
-    """Extract hypothesis array from LLM response (may have markdown wrapping)."""
-    # Try direct parse
+def _parse_theses_json(raw: str, n_expected: int = 5) -> list[dict]:
+    """Extract thesis array from LLM response (may have markdown wrapping)."""
+    # Direct parse
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
@@ -159,7 +178,7 @@ def _parse_hypotheses_json(raw: str, n_expected: int = 5) -> list[dict]:
     except json.JSONDecodeError:
         pass
 
-    # Try extracting from markdown code block
+    # Markdown code block
     import re
     match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
     if match:
@@ -172,7 +191,7 @@ def _parse_hypotheses_json(raw: str, n_expected: int = 5) -> list[dict]:
         except json.JSONDecodeError:
             pass
 
-    # Try finding array brackets
+    # Bare array
     match = re.search(r"\[\s*\{.*\}\s*\]", raw, re.DOTALL)
     if match:
         try:
@@ -182,11 +201,11 @@ def _parse_hypotheses_json(raw: str, n_expected: int = 5) -> list[dict]:
         except json.JSONDecodeError:
             pass
 
-    logger.warning("Could not parse hypotheses from LLM response")
+    logger.warning("Could not parse theses from LLM response")
     return []
 
 
-def _validate_hypothesis(h: dict) -> bool:
+def _validate_thesis(h: dict) -> bool:
     """Check required fields exist and are sensible."""
     required = ["statement", "rationale", "predictions"]
     for field in required:
@@ -196,7 +215,6 @@ def _validate_hypothesis(h: dict) -> bool:
         return False
     if len(h["predictions"]) == 0:
         return False
-    # Clamp scores to [0, 1]
     for key in ("testability", "novelty", "confidence"):
         if key in h:
             h[key] = max(0.0, min(1.0, float(h[key])))
@@ -204,97 +222,151 @@ def _validate_hypothesis(h: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Ranking Agent
+# Phase 2: DIALECTIC — Beta challenges each thesis
 # ---------------------------------------------------------------------------
 
-RANKING_SYSTEM_PROMPT = """\
-You are a scientific peer reviewer evaluating a debate between two ecological
-hypotheses. After reading the debate transcript, determine which hypothesis
-is stronger based on:
+DIALECTIC_SYSTEM_PROMPT = """\
+You are Beta, the dialectical counterpart in the EcoSeek DiDAL system.
+Your role is to CHALLENGE Alpha's theses through structured critique.
 
-1. Evidence quality (0-10): How well-supported are the claims?
-2. Logical coherence (0-10): Is the reasoning sound?
-3. Novelty (0-10): How original is the hypothesis?
-4. Testability (0-10): Can it be empirically tested with available data?
-5. Ecological validity (0-10): Is it grounded in ecological theory?
+For each thesis you face, your job is NOT to destroy it, but to TEST it:
+1. Identify weaknesses, hidden assumptions, and logical gaps
+2. Demand evidence — what data would confirm or refute this?
+3. Propose counter-examples — where would this thesis fail?
+4. Suggest refinements — how could the thesis be strengthened?
+
+DiDAL principles:
+- Critique must be CONSTRUCTIVE — the goal is stronger science, not winning
+- Every challenge must come with a PATH FORWARD — "this is weak because X; try Y"
+- Ground arguments in ecological reality — cite mechanisms, not opinions
+- The thesis that survives your best critique IS the stronger thesis
+
+Debate format — respond in this structure:
+1. CHALLENGE: Identify the weakest point in the thesis
+2. DEMAND: What evidence is missing? What data would test this?
+3. COUNTER: Where would this thesis fail in nature?
+4. REFINE: How could the thesis be improved?
+
+Keep responses under 200 words. Be rigorous but constructive.
+"""
+
+# ---------------------------------------------------------------------------
+# Phase 2b: Dialectical Judgment (Beta's assessment after the clash)
+# ---------------------------------------------------------------------------
+
+DIALECTICAL_JUDGMENT_PROMPT = """\
+You are Beta, evaluating the outcome of a dialectical clash between two
+ecological theses in the DiDAL protocol.
+
+After both sides have been heard, assess which thesis withstood critique
+better based on:
+
+1. Evidence resilience (0-10): Did the thesis hold up under scrutiny?
+2. Logical coherence (0-10): Is the reasoning sound after challenge?
+3. Novelty preservation (0-10): Did novelty survive critique?
+4. Testability (0-10): Can this actually be tested with available data?
+5. Ecological grounding (0-10): Is it rooted in ecological theory?
+
+The thesis that better withstood dialectical testing prevails — not
+because it "won", but because it proved more robust under fire.
 
 Output JSON:
 ```json
 {
-  "winner": "A" or "B",
-  "scores": {
-    "A": {"evidence": 8, "coherence": 7, "novelty": 6, "testability": 9, "validity": 8},
-    "B": {"evidence": 6, "coherence": 8, "novelty": 9, "testability": 5, "validity": 7}
+  "prevailing": "A" or "B",
+  "assessment": {
+    "A": {"resilience": 8, "coherence": 7, "novelty": 6, "testability": 9, "grounding": 8},
+    "B": {"resilience": 6, "coherence": 8, "novelty": 9, "testability": 5, "grounding": 7}
   },
-  "rationale": "Brief explanation of the decision"
+  "rationale": "Why the prevailing thesis proved more dialectically robust"
 }
 ```
 """
 
 
 # ---------------------------------------------------------------------------
-# Evolution Agent
+# Phase 2c: SYNTHESIS — Refine the prevailing thesis
 # ---------------------------------------------------------------------------
 
-EVOLUTION_SYSTEM_PROMPT = """\
-You are an ecological theorist specializing in hypothesis refinement.
-Given a winning hypothesis and critiques from the debate, evolve it:
+SYNTHESIS_SYSTEM_PROMPT = """\
+You are Alpha, synthesizing the outcome of a dialectical clash in the DiDAL
+protocol. A thesis has withstood Beta's critique — now it must be refined.
 
-1. Incorporate valid critiques — fix weaknesses identified by the opponent
-2. Strengthen predictions — make them more specific and measurable
-3. Expand rationale — add ecological mechanisms or references
-4. Update confidence — based on how well it survived the debate
+The Hegelian dialectic: THESIS + ANTITHESIS → SYNTHESIS.
+
+Given the prevailing thesis and the critiques it survived:
+1. INCORPORATE valid challenges — fix the weaknesses Beta exposed
+2. STRENGTHEN predictions — make them more specific and falsifiable
+3. DEEPEN the rationale — add ecological mechanisms revealed by the debate
+4. UPDATE confidence — the thesis is now stronger for having been tested
+5. DOCUMENT changes — what was learned from the dialectical process
+
+This is NOT "evolution" — it is DIALECTICAL SYNTHESIS. The thesis emerges
+stronger precisely because it was challenged.
 
 Output JSON:
 ```json
 {
-  "statement": "refined statement",
-  "rationale": "expanded rationale incorporating debate insights",
+  "statement": "refined thesis statement",
+  "rationale": "deepened rationale incorporating dialectical insights",
   "predictions": ["more specific prediction 1", "more specific prediction 2"],
   "testability": 0.9,
   "novelty": 0.7,
   "confidence": 0.6,
-  "changes_summary": "What was changed and why"
+  "dialectical_insight": "What the critique revealed and how the thesis improved"
 }
 ```
 """
 
 
 # ---------------------------------------------------------------------------
-# Meta-Review Agent
+# Phase 3: SYNTHESIS — Weave refined theses into a research program
 # ---------------------------------------------------------------------------
 
-META_REVIEW_SYSTEM_PROMPT = """\
-You are a senior research program officer synthesizing a tournament of ecological
-hypotheses into a research proposal. Given the ranked hypotheses and debate
-outcomes, produce a structured proposal:
+RESEARCH_PROGRAM_PROMPT = """\
+You are Alpha, the senior ecologist in EcoSeek DiDAL, synthesizing the results
+of a dialectical hypothesis refinement session into a coherent research program.
+
+The theses before you have survived Beta's dialectical testing. They are not
+"ranked" — they are REFINED. Each has been strengthened through critique.
+
+Your task: weave them into a RESEARCH PROGRAM — not a competition result.
 
 Sections:
-1. Title: Concise, informative
-2. Abstract: 150-250 words summarizing the research program
-3. Introduction: Context and significance of the research question
-4. Hypotheses (ranked): Each with Elo score, rationale, and how it emerged from debate
-5. Proposed Methods: How to test the top hypotheses (GBIF, SDM, field, experimental)
-6. Expected Outcomes: What we will learn
-7. References: Key papers and data sources cited
+1. Research Question: The original ecological inquiry
+2. Dialectical Process: How the theses were tested and refined (method)
+3. Refined Theses: Each thesis with its dialectical journey (original →
+   critique → synthesis), current strength, and ecological significance
+4. Integrated Framework: How the theses connect — do they form a coherent
+   picture? Where do they complement or contradict each other?
+5. Proposed Investigation: How to empirically test the synthesized theses
+   (methods, data sources: GBIF, SDM, field, experimental)
+6. Expected Contributions: What this research program would contribute to
+   ecological knowledge
+7. Open Questions: What the dialectical process revealed as still unknown
 
-Output as clean markdown suitable for a grant proposal.
+Output as clean markdown suitable for a research proposal or grant application.
+Remember: this is a DIALECTICAL SYNTHESIS, not a tournament leaderboard.
 """
 
 
 # ---------------------------------------------------------------------------
-# LLM Call Helpers (model-tiered)
+# LLM Call Helpers (model-tiered per DiDAL roles)
 # ---------------------------------------------------------------------------
 
-def _call_deepseek(system_prompt: str, user_message: str,
-                   max_tokens: int = 2000) -> str:
-    """Call DeepSeek API for high-quality generation/meta-review."""
+# Alpha calls: DeepSeek (deep ecological reasoning for thesis + synthesis)
+# Beta calls: EcoCoder local (fast critique, no cost per round)
+
+
+def _alpha_call(system_prompt: str, user_message: str,
+                max_tokens: int = 2000) -> str:
+    """Alpha (thesis generation, synthesis) uses DeepSeek for depth."""
     import urllib.error
     import urllib.request
 
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY not set")
+        raise RuntimeError("DEEPSEEK_API_KEY not set — Alpha needs DeepSeek")
 
     body = json.dumps({
         "model": "deepseek-chat",
@@ -321,14 +393,14 @@ def _call_deepseek(system_prompt: str, user_message: str,
 
     choices = data.get("choices", [])
     if not choices:
-        raise RuntimeError("DeepSeek returned no choices")
+        raise RuntimeError("Alpha (DeepSeek) returned no choices")
     return choices[0]["message"]["content"]
 
 
-def _call_ollama(system_prompt: str, user_message: str,
-                 model: str = "ecocoder:7b",
-                 max_tokens: int = 500) -> str:
-    """Call local Ollama (EcoCoder GPU) for debate matches."""
+def _beta_call(system_prompt: str, user_message: str,
+               model: str = "ecocoder:7b",
+               max_tokens: int = 500) -> str:
+    """Beta (dialectical critique) uses local EcoCoder GPU for fast iteration."""
     import urllib.error
     import urllib.request
 
@@ -356,374 +428,385 @@ def _call_ollama(system_prompt: str, user_message: str,
 
     choices = data.get("choices", [])
     if not choices:
-        raise RuntimeError("Ollama returned no choices")
+        raise RuntimeError("Beta (Ollama) returned no choices")
     return choices[0]["message"]["content"]
 
 
 # ---------------------------------------------------------------------------
-# Core Functions
+# Core DiDAL Protocol Functions
 # ---------------------------------------------------------------------------
 
 
-def generate_hypotheses(
+def generate_theses(
     question: str,
     n: int = 5,
     domain: str = "ecology",
     context: str = "",
 ) -> list[Hypothesis]:
-    """Generate N diverse, testable ecological hypotheses for a question.
+    """Phase 1: THESIS — Alpha generates N testable ecological theses.
 
-    Uses DeepSeek for high-quality generation.
+    Alpha proposes; Beta will challenge them in Phase 2.
     """
-    user_msg = f"Research question: {question}\nDomain: {domain}\nGenerate {n} hypotheses."
+    user_msg = f"Research question: {question}\nDomain: {domain}\nGenerate {n} theses."
     if context:
         user_msg += f"\n\nAdditional context:\n{context}"
 
-    raw = _call_deepseek(GENERATION_SYSTEM_PROMPT, user_msg, max_tokens=2000)
-    parsed = _parse_hypotheses_json(raw, n_expected=n)
+    raw = _alpha_call(THESIS_SYSTEM_PROMPT, user_msg, max_tokens=2000)
+    parsed = _parse_theses_json(raw, n_expected=n)
 
-    hypotheses = []
+    theses = []
     for i, h in enumerate(parsed):
-        if not _validate_hypothesis(h):
-            logger.warning("Hypothesis %d failed validation, skipping", i)
+        if not _validate_thesis(h):
+            logger.warning("Thesis %d failed validation, skipping", i)
             continue
-        hypotheses.append(Hypothesis(
-            id=f"h_{uuid.uuid4().hex[:8]}",
+        theses.append(Hypothesis(
+            id=f"th_{uuid.uuid4().hex[:8]}",
             statement=h["statement"],
             rationale=h["rationale"],
             predictions=h["predictions"],
             testability=h.get("testability", 0.5),
             novelty=h.get("novelty", 0.5),
             confidence=h.get("confidence", 0.5),
-            generation=1,
+            refinement_round=1,
         ))
 
-    logger.info("Generated %d/%d valid hypotheses", len(hypotheses), n)
-    return hypotheses
+    logger.info("Alpha generated %d/%d valid theses", len(theses), n)
+    return theses
 
 
-def rank_debate(transcript: str, hypothesis_a: Hypothesis,
-                hypothesis_b: Hypothesis) -> dict:
-    """Judge a debate match between two hypotheses.
+def dialectical_clash(
+    thesis_a: Hypothesis,
+    thesis_b: Hypothesis,
+    question: str,
+    max_exchanges: int = 4,
+    model: str = "ecocoder:7b",
+) -> dict:
+    """Phase 2: DIALECTIC — Beta challenges both theses in structured debate.
 
-    Uses DeepSeek for quality evaluation.
+    This is NOT a competition. It is a dialectical process where both
+    theses are tested by Beta's critique. The one that withstands
+    scrutiny better demonstrates greater dialectical strength.
+
+    Returns dict with transcript, exchanges, tokens_used.
+    """
+    # Beta's challenge to thesis A
+    def build_beta_prompt(thesis: Hypothesis, opponent: Hypothesis) -> str:
+        return f"""\
+You are Beta, challenging the following ecological thesis in the DiDAL protocol.
+
+RESEARCH QUESTION: {question}
+
+THESIS UNDER SCRUTINY: {thesis.statement}
+RATIONALE: {thesis.rationale}
+PREDICTIONS: {json.dumps(thesis.predictions)}
+
+OPPOSING THESIS (for context): {opponent.statement}
+
+Remember: your role is CONSTRUCTIVE CRITIQUE. Challenge rigorously but
+always suggest how the thesis could be strengthened.
+"""
+
+    transcript_lines = []
+    total_tokens = 0
+
+    # Round 1: Beta challenges thesis A
+    prompt_a = build_beta_prompt(thesis_a, thesis_b)
+    msg_a = f"Challenge this thesis: {thesis_a.statement}"
+    try:
+        crit_a = _beta_call(DIALECTIC_SYSTEM_PROMPT, msg_a, model=model, max_tokens=300)
+    except Exception as e:
+        logger.warning("Beta critique of thesis A failed: %s", e)
+        crit_a = f"[Dialectical error: {e}]"
+    transcript_lines.append(f"[Exchange 1] Beta challenges Thesis A:\n{crit_a}")
+
+    # Round 1: Beta challenges thesis B
+    prompt_b = build_beta_prompt(thesis_b, thesis_a)
+    msg_b = f"Challenge this thesis: {thesis_b.statement}"
+    try:
+        crit_b = _beta_call(DIALECTIC_SYSTEM_PROMPT, msg_b, model=model, max_tokens=300)
+    except Exception as e:
+        logger.warning("Beta critique of thesis B failed: %s", e)
+        crit_b = f"[Dialectical error: {e}]"
+    transcript_lines.append(f"[Exchange 1] Beta challenges Thesis B:\n{crit_b}")
+
+    # Rounds 2..max_exchanges: alternating deeper critique
+    for ex in range(2, max_exchanges + 1):
+        # Beta deepens critique of A
+        msg = f"Deepen your critique. Previous challenge: {crit_a[:300]}\nResponse so far: {crit_b[:300]}"
+        try:
+            crit_a = _beta_call(DIALECTIC_SYSTEM_PROMPT, msg, model=model, max_tokens=300)
+        except Exception as e:
+            crit_a = f"[Dialectical error: {e}]"
+        transcript_lines.append(f"[Exchange {ex}] Beta deepens on Thesis A:\n{crit_a}")
+
+        # Beta deepens critique of B
+        msg = f"Deepen your critique. Previous challenge: {crit_b[:300]}\nResponse so far: {crit_a[:300]}"
+        try:
+            crit_b = _beta_call(DIALECTIC_SYSTEM_PROMPT, msg, model=model, max_tokens=300)
+        except Exception as e:
+            crit_b = f"[Dialectical error: {e}]"
+        transcript_lines.append(f"[Exchange {ex}] Beta deepens on Thesis B:\n{crit_b}")
+
+    transcript = "\n\n".join(transcript_lines)
+    return {
+        "transcript": transcript,
+        "exchanges": max_exchanges,
+        "total_tokens": total_tokens,
+    }
+
+
+def judge_dialectic(transcript: str, thesis_a: Hypothesis,
+                    thesis_b: Hypothesis) -> dict:
+    """Phase 2b: DIALECTICAL JUDGMENT — Alpha assesses which thesis
+    withstood Beta's critique better.
+
+    Returns dict with prevailing thesis, assessment scores, rationale.
     """
     user_msg = (
-        f"Debate transcript:\n{transcript}\n\n"
-        f"Hypothesis A: {hypothesis_a.statement}\n"
-        f"Hypothesis B: {hypothesis_b.statement}\n\n"
-        f"Evaluate and declare the winner."
+        f"Dialectical transcript:\n{transcript}\n\n"
+        f"Thesis A: {thesis_a.statement}\n"
+        f"Thesis B: {thesis_b.statement}\n\n"
+        f"Assess which thesis better withstood dialectical testing."
     )
 
-    raw = _call_deepseek(RANKING_SYSTEM_PROMPT, user_msg, max_tokens=500)
+    raw = _alpha_call(DIALECTICAL_JUDGMENT_PROMPT, user_msg, max_tokens=500)
     try:
         result = json.loads(raw)
         if isinstance(result, list):
-            # Got a list instead of dict — default to A
-            result = {"winner": "A", "rationale": "Could not parse ranking (got list)"}
+            result = {"prevailing": "A", "rationale": "Could not parse judgment"}
     except json.JSONDecodeError:
-        # Fallback: parse from text
         import re
         match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
         if match:
             try:
                 result = json.loads(match.group(1))
             except json.JSONDecodeError:
-                result = {"winner": "A", "rationale": "Could not parse ranking"}
+                result = {"prevailing": "A", "rationale": "Could not parse judgment"}
         else:
-            logger.warning("Could not parse ranking result, defaulting to A")
-            result = {"winner": "A", "rationale": "Could not parse ranking"}
+            logger.warning("Could not parse dialectical judgment, defaulting to A")
+            result = {"prevailing": "A", "rationale": "Could not parse judgment"}
 
     return result
 
 
-def evolve_hypothesis(winner: Hypothesis, loser_critiques: str) -> Hypothesis:
-    """Refine a winning hypothesis using critiques from the debate.
+def synthesize_thesis(prevailing: Hypothesis,
+                      critique_transcript: str) -> Hypothesis:
+    """Phase 2c: SYNTHESIS — Alpha refines the prevailing thesis using
+    insights from Beta's critique.
 
-    Uses DeepSeek for quality refinement.
+    Hegelian: THESIS + ANTITHESIS → SYNTHESIS.
     """
     user_msg = (
-        f"Original hypothesis: {winner.statement}\n"
-        f"Rationale: {winner.rationale}\n"
-        f"Predictions: {json.dumps(winner.predictions)}\n\n"
-        f"Critiques from debate:\n{loser_critiques}\n\n"
-        f"Evolve this hypothesis. Return JSON."
+        f"Prevailing thesis: {prevailing.statement}\n"
+        f"Original rationale: {prevailing.rationale}\n"
+        f"Original predictions: {json.dumps(prevailing.predictions)}\n\n"
+        f"Beta's dialectical critique:\n{critique_transcript}\n\n"
+        f"Synthesize a refined thesis. Return JSON."
     )
 
-    raw = _call_deepseek(EVOLUTION_SYSTEM_PROMPT, user_msg, max_tokens=800)
+    raw = _alpha_call(SYNTHESIS_SYSTEM_PROMPT, user_msg, max_tokens=800)
     try:
-        evolved = json.loads(raw)
-        if isinstance(evolved, list):
-            logger.warning("Evolution returned list instead of dict, using original")
-            return winner
+        synthesized = json.loads(raw)
+        if isinstance(synthesized, list):
+            logger.warning("Synthesis returned list instead of dict, keeping original")
+            return prevailing
     except json.JSONDecodeError:
         import re
         match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
         if match:
             try:
-                evolved = json.loads(match.group(1))
-                if isinstance(evolved, list):
-                    return winner
+                synthesized = json.loads(match.group(1))
+                if isinstance(synthesized, list):
+                    return prevailing
             except (json.JSONDecodeError, AttributeError):
-                logger.warning("Could not parse evolution, returning original")
-                return winner
+                logger.warning("Could not parse synthesis, keeping original")
+                return prevailing
         else:
-            logger.warning("Could not parse evolution, returning original")
-            return winner
+            logger.warning("Could not parse synthesis, keeping original")
+            return prevailing
 
     return Hypothesis(
-        id=f"h_{uuid.uuid4().hex[:8]}",
-        statement=evolved.get("statement", winner.statement),
-        rationale=evolved.get("rationale", winner.rationale),
-        predictions=evolved.get("predictions", winner.predictions),
-        testability=float(evolved.get("testability", winner.testability)),
-        novelty=float(evolved.get("novelty", winner.novelty)),
-        confidence=float(evolved.get("confidence", winner.confidence)),
-        elo=winner.elo,
-        generation=winner.generation + 1,
-        parent_id=winner.id,
+        id=f"th_{uuid.uuid4().hex[:8]}",
+        statement=synthesized.get("statement", prevailing.statement),
+        rationale=synthesized.get("rationale", prevailing.rationale),
+        predictions=synthesized.get("predictions", prevailing.predictions),
+        testability=float(synthesized.get("testability", prevailing.testability)),
+        novelty=float(synthesized.get("novelty", prevailing.novelty)),
+        confidence=float(synthesized.get("confidence", prevailing.confidence)),
+        dialectical_strength=prevailing.dialectical_strength,
+        refinement_round=prevailing.refinement_round + 1,
+        parent_id=prevailing.id,
     )
 
 
-def debate_match(
-    hypothesis_a: Hypothesis,
-    hypothesis_b: Hypothesis,
+def weave_research_program(
     question: str,
-    max_turns: int = 4,
-    model: str = "ecocoder:7b",
-) -> dict:
-    """Run a 1v1 debate between two hypotheses using local EcoCoder.
-
-    Returns dict with transcript, turn_count, tokens_used.
-    """
-    debate_prompt = f"""\
-You are defending the following ecological hypothesis in a scientific debate.
-
-RESEARCH QUESTION: {question}
-
-YOUR HYPOTHESIS: {hypothesis_a.statement}
-RATIONALE: {hypothesis_a.rationale}
-PREDICTIONS: {json.dumps(hypothesis_a.predictions)}
-
-YOUR OPPONENT'S HYPOTHESIS: {hypothesis_b.statement}
-
-Debate format — respond in exactly this structure each turn:
-1. CLAIM: State your argument concisely
-2. EVIDENCE: Cite ecological mechanisms, data, or literature
-3. REBUTTAL: Address your opponent's last point (if any)
-
-Keep responses under 200 words. Be specific and evidence-based.
-Do NOT concede unless the evidence clearly favors your opponent.
-"""
-
-    transcript_lines = []
-    total_tokens = 0
-    turn = 0
-
-    # Round 1: A opens
-    a_msg = f"Opening statement for hypothesis A. Defend: {hypothesis_a.statement}"
-    try:
-        a_resp = _call_ollama(debate_prompt, a_msg, model=model, max_tokens=300)
-    except Exception as e:
-        logger.warning("Debate A opening failed: %s", e)
-        a_resp = f"[Error: {e}]"
-    transcript_lines.append(f"[Turn {turn}] A (opening): {a_resp}")
-    turn += 1
-
-    # Round 1: B responds
-    b_prompt = debate_prompt.replace(
-        hypothesis_a.statement, hypothesis_b.statement
-    ).replace(
-        hypothesis_a.rationale, hypothesis_b.rationale
-    ).replace(
-        json.dumps(hypothesis_a.predictions), json.dumps(hypothesis_b.predictions)
-    ).replace(
-        hypothesis_b.statement, hypothesis_a.statement
-    )
-    b_msg = f"Respond to opponent's opening: {a_resp[:300]}"
-    try:
-        b_resp = _call_ollama(b_prompt, b_msg, model=model, max_tokens=300)
-    except Exception as e:
-        logger.warning("Debate B response failed: %s", e)
-        b_resp = f"[Error: {e}]"
-    transcript_lines.append(f"[Turn {turn}] B (response): {b_resp}")
-    turn += 1
-
-    # Rounds 2..max_turns: alternating
-    for t in range(turn, max_turns * 2):
-        if t % 2 == 0:
-            # A's turn
-            msg = f"Turn {t//2 + 1}. Respond to opponent: {b_resp[:300]}"
-            try:
-                a_resp = _call_ollama(debate_prompt, msg, model=model, max_tokens=300)
-            except Exception as e:
-                a_resp = f"[Error: {e}]"
-            transcript_lines.append(f"[Turn {t}] A: {a_resp}")
-        else:
-            # B's turn
-            msg = f"Turn {t//2 + 1}. Respond to opponent: {a_resp[:300]}"
-            try:
-                b_resp = _call_ollama(b_prompt, msg, model=model, max_tokens=300)
-            except Exception as e:
-                b_resp = f"[Error: {e}]"
-            transcript_lines.append(f"[Turn {t}] B: {b_resp}")
-
-    transcript = "\n\n".join(transcript_lines)
-    return {
-        "transcript": transcript,
-        "turns": max_turns * 2,
-        "total_tokens": total_tokens,
-    }
-
-
-def synthesize_proposal(
-    question: str,
-    hypotheses: list[Hypothesis],
-    tournament_log: list[dict],
+    theses: list[Hypothesis],
+    dialectical_log: list[dict],
 ) -> str:
-    """Generate a research proposal from ranked hypotheses.
+    """Phase 3: SYNTHESIS — Alpha weaves all refined theses into a
+    coherent ecological research program.
 
-    Uses DeepSeek for high-quality synthesis.
+    This is the final output: not a ranking, but a research proposal
+    born from dialectical refinement.
     """
-    ranked = sorted(hypotheses, key=lambda h: h.elo, reverse=True)
-    hypotheses_text = "\n\n".join(
-        f"### {i+1}. {h.statement} (Elo: {h.elo}, Generation: {h.generation})\n"
-        f"Rationale: {h.rationale}\n"
-        f"Predictions: {', '.join(h.predictions)}\n"
-        f"Testability: {h.testability}, Novelty: {h.novelty}"
-        for i, h in enumerate(ranked)
+    # Order by dialectical strength (internal metric, not exposed as "ranking")
+    ordered = sorted(theses, key=lambda h: h.dialectical_strength, reverse=True)
+    theses_text = "\n\n".join(
+        f"### Thesis {i+1}: {h.statement}\n"
+        f"* Dialectical strength: {h.dialectical_strength:.0f} "
+        f"(refined through {h.refinement_round} round(s))*\n\n"
+        f"Rationale: {h.rationale}\n\n"
+        f"Predictions: {', '.join(h.predictions)}\n\n"
+        f"Testability: {h.testability:.0%} | Novelty: {h.novelty:.0%} | "
+        f"Confidence: {h.confidence:.0%}"
+        for i, h in enumerate(ordered)
     )
 
-    summary_text = "\n".join(
-        f"Round {log.get('round', '?')}: {log.get('winner_id', '?')} "
-        f"defeated {log.get('loser_id', '?')}"
-        for log in tournament_log[-10:]  # Last 10 matches
+    process_summary = "\n".join(
+        f"Round {log.get('round', '?')}: "
+        f"Thesis {log.get('prevailing_id', '?')} withstood critique "
+        f"against thesis {log.get('challenged_id', '?')}"
+        for log in dialectical_log[-10:]
     )
 
     user_msg = (
         f"Research question: {question}\n\n"
-        f"Ranked hypotheses:\n{hypotheses_text}\n\n"
-        f"Tournament summary:\n{summary_text}\n\n"
-        f"Synthesize into a research proposal."
+        f"Refined theses (ordered by dialectical strength):\n{theses_text}\n\n"
+        f"Dialectical process summary:\n{process_summary}\n\n"
+        f"Weave these into a coherent ecological research program."
     )
 
-    return _call_deepseek(META_REVIEW_SYSTEM_PROMPT, user_msg, max_tokens=3000)
+    return _alpha_call(RESEARCH_PROGRAM_PROMPT, user_msg, max_tokens=3000)
 
 
-def hypothesis_tournament(
+# ---------------------------------------------------------------------------
+# DiDAL Hypothesis Protocol — Main Entry Point
+# ---------------------------------------------------------------------------
+
+
+def dialectical_hypothesis_refinement(
     question: str,
-    n_hypotheses: int = 5,
+    n_theses: int = 5,
     n_rounds: int = 3,
     domain: str = "ecology",
     context: str = "",
     task_id: Optional[str] = None,
 ) -> str:
-    """Orchestrate a full hypothesis tournament.
+    """Run the full DiDAL Hypothesis Protocol.
 
-    Phase 1: Generate N hypotheses
-    Phase 2: Elo tournament (Swiss-system pairing, n_rounds)
-    Phase 3: Meta-review synthesis
+    THESIS → DIALECTIC → SYNTHESIS
 
-    Returns JSON with ranked hypotheses, tournament log, and proposal.
+    1. Alpha generates N ecological theses (thesis)
+    2. Beta challenges each through structured critique (antithesis)
+    3. Alpha synthesizes refined theses + research program (synthesis)
+
+    This is dialectical science, not a tournament. Theses are strengthened
+    through critique, not eliminated by ranking.
+
+    Returns JSON with refined theses, dialectical log, and research program.
     """
     t0 = time.time()
     trace_id = task_id or str(uuid.uuid4())[:8]
-    tournament_log: list[dict] = []
+    dialectical_log: list[dict] = []
 
-    # ------------------------------------------------------------------
-    # Phase 1: GENERATE
-    # ------------------------------------------------------------------
-    logger.info("tournament[%s] Phase 1: generating %d hypotheses", trace_id, n_hypotheses)
-    hypotheses = generate_hypotheses(
-        question, n=n_hypotheses, domain=domain, context=context
-    )
+    # ==================================================================
+    # Phase 1: THESIS — Alpha generates
+    # ==================================================================
+    logger.info("didal[%s] Phase 1: Alpha generating %d theses", trace_id, n_theses)
+    theses = generate_theses(question, n=n_theses, domain=domain, context=context)
 
-    if len(hypotheses) < 3:
+    if len(theses) < 3:
         return json.dumps({
             "success": False,
-            "error": "not_enough_hypotheses",
-            "message": f"Only {len(hypotheses)} valid hypotheses generated (need ≥3).",
+            "error": "insufficient_theses",
+            "message": (
+                f"Alpha generated only {len(theses)} valid theses "
+                f"(need ≥3 for dialectical testing)."
+            ),
             "trace_id": trace_id,
         })
 
-    tournament_log.append({
-        "phase": "generate",
-        "n_requested": n_hypotheses,
-        "n_generated": len(hypotheses),
-        "hypotheses": [h.to_dict() for h in hypotheses],
+    dialectical_log.append({
+        "phase": "thesis",
+        "n_requested": n_theses,
+        "n_generated": len(theses),
+        "theses": [t.to_dict() for t in theses],
     })
 
-    # ------------------------------------------------------------------
-    # Phase 2: TOURNAMENT
-    # ------------------------------------------------------------------
-    logger.info("tournament[%s] Phase 2: %d rounds of debate", trace_id, n_rounds)
+    # ==================================================================
+    # Phase 2: DIALECTIC — Beta challenges, Alpha synthesizes
+    # ==================================================================
+    logger.info("didal[%s] Phase 2: %d rounds of dialectical testing", trace_id, n_rounds)
 
     for round_num in range(1, n_rounds + 1):
-        # Sort by Elo for Swiss-style pairing (adjacent pairs)
-        sorted_h = sorted(hypotheses, key=lambda h: h.elo, reverse=True)
-        round_matches = []
+        # Pair theses by dialectical strength for focused clash
+        sorted_theses = sorted(theses, key=lambda h: h.dialectical_strength, reverse=True)
 
-        for i in range(0, len(sorted_h) - 1, 2):
-            h_a = sorted_h[i]
-            h_b = sorted_h[i + 1]
+        for i in range(0, len(sorted_theses) - 1, 2):
+            th_a = sorted_theses[i]
+            th_b = sorted_theses[i + 1]
 
             logger.info(
-                "tournament[%s] Round %d: %s (Elo %.0f) vs %s (Elo %.0f)",
-                trace_id, round_num, h_a.id, h_a.elo, h_b.id, h_b.elo,
+                "didal[%s] Round %d: %s (%.0f) ↔ %s (%.0f)",
+                trace_id, round_num, th_a.id, th_a.dialectical_strength,
+                th_b.id, th_b.dialectical_strength,
             )
 
-            # Run debate
-            match_result = debate_match(h_a, h_b, question)
-            transcript = match_result["transcript"]
+            # Beta challenges both theses
+            clash = dialectical_clash(th_a, th_b, question)
+            transcript = clash["transcript"]
 
-            # Rank the debate
-            ranking = rank_debate(transcript, h_a, h_b)
-            winner_id = h_a.id if ranking.get("winner") == "A" else h_b.id
-            loser_id = h_b.id if ranking.get("winner") == "A" else h_a.id
+            # Alpha judges which withstood critique better
+            judgment = judge_dialectic(transcript, th_a, th_b)
+            prevailing_id = th_a.id if judgment.get("prevailing") == "A" else th_b.id
+            challenged_id = th_b.id if judgment.get("prevailing") == "A" else th_a.id
 
-            # Update Elo
-            winner = h_a if winner_id == h_a.id else h_b
-            loser = h_b if winner_id == h_a.id else h_b
-            new_w, new_l = update_elo(winner.elo, loser.elo)
-            winner.elo = new_w
-            loser.elo = new_l
+            # Update dialectical strength
+            prevailing = th_a if prevailing_id == th_a.id else th_b
+            challenged = th_b if prevailing_id == th_a.id else th_b
+            new_prev, new_chall = update_dialectical_strength(
+                prevailing.dialectical_strength, challenged.dialectical_strength
+            )
+            prevailing.dialectical_strength = new_prev
+            challenged.dialectical_strength = new_chall
 
-            # Evolve the winner
-            evolved = evolve_hypothesis(winner, transcript)
-            evolved.elo = new_w  # Carry forward the new Elo
-            # Replace the winner with evolved version
-            for j, h in enumerate(hypotheses):
-                if h.id == winner.id:
-                    hypotheses[j] = evolved
+            # Alpha synthesizes the prevailing thesis
+            synthesized = synthesize_thesis(prevailing, transcript)
+            synthesized.dialectical_strength = new_prev
+
+            # Replace the original with the synthesized version
+            for j, th in enumerate(theses):
+                if th.id == prevailing.id:
+                    theses[j] = synthesized
                     break
 
-            match_log = {
-                "phase": "tournament",
+            clash_log = {
+                "phase": "dialectic",
                 "round": round_num,
-                "hypothesis_a": h_a.to_dict(),
-                "hypothesis_b": h_b.to_dict(),
-                "winner_id": winner_id,
-                "loser_id": loser_id,
-                "elo_after": {"winner": new_w, "loser": new_l},
-                "ranking": ranking,
-                "evolved": evolved.to_dict() if evolved.id != winner.id else None,
+                "thesis_a": th_a.to_dict(),
+                "thesis_b": th_b.to_dict(),
+                "prevailing_id": prevailing_id,
+                "challenged_id": challenged_id,
+                "strength_after": {"prevailing": new_prev, "challenged": new_chall},
+                "judgment": judgment,
+                "synthesized": synthesized.to_dict() if synthesized.id != prevailing.id else None,
             }
-            round_matches.append(match_log)
-            tournament_log.append(match_log)
+            dialectical_log.append(clash_log)
 
             logger.info(
-                "tournament[%s] Round %d match: %s beats %s (Elo: %.0f > %.0f)",
-                trace_id, round_num, winner_id, loser_id, new_w, new_l,
+                "didal[%s] Round %d: %s prevails over %s (strength: %.0f > %.0f)",
+                trace_id, round_num, prevailing_id, challenged_id, new_prev, new_chall,
             )
 
-    # ------------------------------------------------------------------
-    # Phase 3: META-REVIEW
-    # ------------------------------------------------------------------
-    logger.info("tournament[%s] Phase 3: synthesizing proposal", trace_id)
-    proposal = synthesize_proposal(question, hypotheses, tournament_log)
+    # ==================================================================
+    # Phase 3: SYNTHESIS — Alpha weaves into research program
+    # ==================================================================
+    logger.info("didal[%s] Phase 3: Alpha weaving research program", trace_id)
+    research_program = weave_research_program(question, theses, dialectical_log)
 
-    # Final rankings
-    ranked = sorted(hypotheses, key=lambda h: h.elo, reverse=True)
+    # Order by dialectical strength for the output
+    ordered = sorted(theses, key=lambda h: h.dialectical_strength, reverse=True)
 
     duration_s = round(time.time() - t0, 1)
     result = {
@@ -731,16 +814,17 @@ def hypothesis_tournament(
         "trace_id": trace_id,
         "research_question": question,
         "domain": domain,
-        "n_rounds": n_rounds,
-        "tournament_log": tournament_log,
-        "ranked_hypotheses": [h.to_dict() for h in ranked],
-        "proposal": proposal,
+        "dialectical_rounds": n_rounds,
+        "protocol": "DiDAL Hypothesis Protocol — THESIS → ANTITHESIS → SYNTHESIS",
+        "dialectical_log": dialectical_log,
+        "refined_theses": [t.to_dict() for t in ordered],
+        "research_program": research_program,
         "duration_s": duration_s,
     }
 
     logger.info(
-        "tournament[%s] complete: %d hypotheses ranked in %.1fs",
-        trace_id, len(ranked), duration_s,
+        "didal[%s] Protocol complete: %d theses refined in %.1fs",
+        trace_id, len(ordered), duration_s,
     )
 
     return json.dumps(result, indent=2)
@@ -750,28 +834,31 @@ def hypothesis_tournament(
 # Tool Schema for Hermes registration
 # ---------------------------------------------------------------------------
 
-HYPOTHESIS_TOURNAMENT_SCHEMA = {
-    "name": "hypothesis_tournament",
+DIALECTICAL_HYPOTHESIS_SCHEMA = {
+    "name": "dialectical_hypothesis",
     "description": (
-        "Run a multi-agent hypothesis tournament for ecological research. "
-        "Generates N hypotheses, debates them in Elo-ranked matches, "
-        "evolves winners, and synthesizes a research proposal. "
-        "Inspired by Google DeepMind's Co-Scientist (Nature 2026)."
+        "Run the DiDAL Hypothesis Protocol: THESIS → ANTITHESIS → SYNTHESIS. "
+        "Alpha (the ecologist) generates ecological hypotheses. Beta (the "
+        "dialectical counterpart) challenges them through structured critique. "
+        "Alpha synthesizes the refined theses into a coherent research program. "
+        "This is dialectical science — hypotheses are strengthened through "
+        "critique, not eliminated by ranking. "
+        "Part of the EcoSeek DiDAL (Dialectical Dual-Agent Loop) protocol."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "question": {
                 "type": "string",
-                "description": "The ecological research question to investigate.",
+                "description": "The ecological research question to investigate dialectically.",
             },
-            "n_hypotheses": {
+            "n_theses": {
                 "type": "integer",
-                "description": "Number of hypotheses to generate (3-10, default 5).",
+                "description": "Number of initial theses Alpha should generate (3-10, default 5).",
             },
             "n_rounds": {
                 "type": "integer",
-                "description": "Number of tournament rounds (1-5, default 3).",
+                "description": "Rounds of dialectical testing (1-5, default 3).",
             },
             "domain": {
                 "type": "string",
@@ -779,7 +866,7 @@ HYPOTHESIS_TOURNAMENT_SCHEMA = {
             },
             "context": {
                 "type": "string",
-                "description": "Additional context, data sources, or constraints.",
+                "description": "Additional context, data sources, or constraints for Alpha.",
             },
         },
         "required": ["question"],
