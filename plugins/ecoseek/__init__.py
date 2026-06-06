@@ -820,9 +820,31 @@ def register(ctx) -> None:
         check_fn=lambda: True,
     )
 
+    # -- Hypothesis Tournament (Phase 4 — Co-Scientist inspired) -------------
+
+    hypo_mod = import_module(".hypothesis_engine", package=__name__)
+
+    ctx.register_tool(
+        name="hypothesis_tournament",
+        toolset="ecoseek",
+        schema=hypo_mod.HYPOTHESIS_TOURNAMENT_SCHEMA,
+        handler=lambda args, **kw: hypo_mod.hypothesis_tournament(
+            question=args.get("question", ""),
+            n_hypotheses=args.get("n_hypotheses", 5),
+            n_rounds=args.get("n_rounds", 3),
+            domain=args.get("domain", "ecology"),
+            context=args.get("context", ""),
+            task_id=kw.get("task_id"),
+        ),
+        check_fn=lambda: bool(
+            os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("OLLAMA_BASE_URL", "http://172.27.112.1:11434")
+        ),
+    )
+
     logger.info(
-        "ecoseek plugin registered: 11 tools "
+        "ecoseek plugin registered: 12 tools "
         "(escalate_remote, dialectical_exchange, eco_analyze, ku_hpc, "
         "fire_and_forget, pattern_check, delegate_task, list_subagents, "
-        "hpc_workflow, optimization_report, optimize_call)"
+        "hpc_workflow, optimization_report, optimize_call, hypothesis_tournament)"
     )
