@@ -1,13 +1,13 @@
 name: ecoseek
-version: "0.7.0"
+version: "0.8.0"
 description: >
-  EcoSeek Phase 4 — DiDAL Hypothesis Protocol.
-  Dialectical thesis refinement: THESIS (Alpha generates) →
-  ANTITHESIS (Beta challenges) → SYNTHESIS (Alpha weaves into
-  research program). Hegelian dialectics applied to ecological
-  hypothesis testing. Not a tournament — dialectical science.
-  Alpha tools: escalate_remote, dialectical_exchange, dialectical_hypothesis.
-  Beta tools: eco_analyze, ku_hpc.
+  EcoSeek Phase 5 — MCP-ified ecological tools.
+  25 ecological analysis tools exposed as standalone MCP server
+  (eco_query_species, eco_fit_sdm, eco_resolve_taxonomy, ...).
+  Compatible with any MCP client (Hermes, Claude Desktop, Cursor, Continue).
+  DiDAL Alpha tools: escalate_remote, dialectical_exchange, dialectical_hypothesis.
+  Beta tools: eco_analyze (legacy), ku_hpc.
+  MCP: mcp_ecoagent.py (stdio + HTTP transport).
   T1 tools: fire_and_forget, pattern_check, delegate_task, hpc_workflow.
   Enable via `hermes plugins enable ecoseek`.
 author: EcoSeek / alrobles
