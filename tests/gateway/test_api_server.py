@@ -3559,6 +3559,22 @@ class TestExecEndpoint:
             data = await resp.json()
             assert data["exit_code"] == 3
 
+    @pytest.mark.asyncio
+    async def test_exec_separates_stdout_and_stderr(self, adapter):
+        """stdout is the payload; stderr is returned separately so banners/noise
+        (e.g. the SSH login banner) don't pollute the command output."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/exec",
+                json={"cmd": "echo OUTLINE; echo ERRLINE 1>&2", "mode": "local"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert "OUTLINE" in data["output"]
+            assert "ERRLINE" not in data["output"]
+            assert "ERRLINE" in data.get("stderr", "")
+
     @pytest.mark.live_system_guard_bypass
     @pytest.mark.asyncio
     async def test_exec_timeout(self, adapter):
