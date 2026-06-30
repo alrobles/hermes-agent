@@ -8,6 +8,7 @@ Exposes an HTTP server with endpoints:
 - DELETE /v1/responses/{response_id} — Delete a stored response
 - GET  /v1/models                  — lists hermes-agent as an available model
 - GET  /v1/capabilities            — machine-readable API capabilities for external UIs
+- POST /exec  (alias /v1/exec)     — non-agentic direct command execution (no LLM): runs a shell command on the gateway host or on a remote host over SSH and returns raw output. Fast/cheap path for trusted automation; same Bearer auth.
 - POST /v1/runs                    — start a run, returns run_id immediately (202)
 - GET  /v1/runs/{run_id}           — retrieve current run status
 - GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
@@ -85,6 +86,15 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+
+# --- Direct (non-agentic) exec endpoint -------------------------------------
+# POST /exec runs a shell command without touching the LLM runtime. Bounds keep
+# a single call fast and the response small (the caller pays per output byte).
+EXEC_DEFAULT_TIMEOUT = 45.0
+EXEC_MAX_TIMEOUT = 600.0
+EXEC_MAX_OUTPUT_BYTES = 200_000  # 200 KB cap on returned output
+EXEC_DEFAULT_HPC_HOST = "a474r867@hpc.crc.ku.edu"
+EXEC_DEFAULT_HPC_SSH_KEY = "~/.ssh/hpc_a474r867_ed25519_new"
 
 # ---------------------------------------------------------------------------
 # hermes-fast / hermes-reasoner — bypass model aliases
@@ -1130,6 +1140,128 @@ class APIServerAdapter(BasePlatformAdapter):
             "pid": os.getpid(),
         })
 
+    async def _handle_exec(self, request: "web.Request") -> "web.Response":
+        """POST /exec — non-agentic direct command execution (no LLM in the loop).
+
+        Bypasses the agent runtime entirely: runs a shell command either on the
+        gateway host (``mode="local"``) or on the KU HPC cluster over SSH
+        (``mode="raw"``, the default) and returns raw output. This exists to make
+        Devin→Hermes→HPC round-trips fast and cheap — deterministic, ~1-2s, and
+        zero LLM tokens — versus routing a command through ``/v1/chat/completions``
+        (which pays for the agent loop and serialises requests).
+
+        Auth: the same Bearer key as ``/v1/chat/completions`` (``_check_auth``).
+        Concurrency-safe: uses an async subprocess so the event loop stays free.
+
+        Request JSON::
+
+            {"cmd": "<shell command>", "timeout": <secs>, "mode": "raw"|"local"}
+
+        Response JSON::
+
+            {"output": "<combined stdout+stderr>", "exit_code": <int>, "duration_s": <float>}
+        """
+        auth_err = self._check_auth(request)
+        if auth_err is not None:
+            return auth_err
+
+        if os.getenv("HERMES_EXEC_ENABLED", "1").strip().lower() in _FALSE_REQUEST_BOOL_STRINGS:
+            return web.json_response(
+                _openai_error("Direct exec endpoint is disabled.", code="exec_disabled"),
+                status=403,
+            )
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON in request body"), status=400)
+        if not isinstance(body, dict):
+            return web.json_response(_openai_error("Request body must be a JSON object"), status=400)
+
+        cmd = body.get("cmd")
+        if not isinstance(cmd, str) or not cmd.strip():
+            return web.json_response(
+                _openai_error("Missing or empty required field: cmd", code="missing_cmd"),
+                status=400,
+            )
+
+        mode = str(body.get("mode", "raw")).strip().lower()
+        if mode not in ("raw", "local"):
+            return web.json_response(
+                _openai_error("mode must be 'raw' or 'local'", code="invalid_mode"),
+                status=400,
+            )
+
+        try:
+            timeout = float(body.get("timeout", EXEC_DEFAULT_TIMEOUT))
+        except (TypeError, ValueError):
+            return web.json_response(
+                _openai_error("timeout must be a number", code="invalid_timeout"),
+                status=400,
+            )
+        timeout = max(1.0, min(timeout, EXEC_MAX_TIMEOUT))
+
+        if mode == "local":
+            argv = ["bash", "-lc", cmd]
+        else:
+            ssh_key = os.path.expanduser(
+                os.getenv("HPC_SSH_KEY", EXEC_DEFAULT_HPC_SSH_KEY)
+            )
+            hpc_host = os.getenv("HPC_HOST", EXEC_DEFAULT_HPC_HOST)
+            argv = [
+                "ssh", "-i", ssh_key,
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=10",
+                "-o", "ServerAliveInterval=10",
+                "-o", "ServerAliveCountMax=2",
+                "-o", "StrictHostKeyChecking=accept-new",
+                hpc_host, cmd,
+            ]
+
+        started = time.monotonic()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                stdin=asyncio.subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, PermissionError) as exc:
+            return web.json_response(
+                _openai_error(f"exec backend unavailable: {exc}", code="exec_backend_missing"),
+                status=500,
+            )
+
+        try:
+            stdout_data, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            return web.json_response({
+                "output": f"[exec timed out after {timeout:g}s]",
+                "exit_code": 124,
+                "duration_s": round(time.monotonic() - started, 3),
+                "timed_out": True,
+            })
+
+        duration = time.monotonic() - started
+        output = (stdout_data or b"").decode("utf-8", errors="replace")
+        truncated = len(output.encode("utf-8")) > EXEC_MAX_OUTPUT_BYTES
+        if truncated:
+            output = output.encode("utf-8")[:EXEC_MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+            output += "\n[output truncated]"
+        payload = {
+            "output": output,
+            "exit_code": proc.returncode,
+            "duration_s": round(duration, 3),
+        }
+        if truncated:
+            payload["truncated"] = True
+        return web.json_response(payload)
+
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return available models including bypass aliases."""
         auth_err = self._check_auth(request)
@@ -1224,6 +1356,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "health_detailed": {"method": "GET", "path": "/health/detailed"},
                 "models": {"method": "GET", "path": "/v1/models"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
+                "exec": {"method": "POST", "path": "/exec"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
                 "runs": {"method": "POST", "path": "/v1/runs"},
                 "run_status": {"method": "GET", "path": "/v1/runs/{run_id}"},
@@ -4568,6 +4701,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
+            self._app.router.add_post("/exec", self._handle_exec)
+            self._app.router.add_post("/v1/exec", self._handle_exec)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
