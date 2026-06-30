@@ -96,6 +96,19 @@ EXEC_MAX_OUTPUT_BYTES = 200_000  # 200 KB cap on returned output
 EXEC_DEFAULT_HPC_HOST = "a474r867@hpc.crc.ku.edu"
 EXEC_DEFAULT_HPC_SSH_KEY = "~/.ssh/hpc_a474r867_ed25519_new"
 
+
+def _truncate_exec_stream(data: Optional[bytes]) -> tuple[str, bool]:
+    """Decode a subprocess stream, capping it at ``EXEC_MAX_OUTPUT_BYTES``.
+
+    Returns ``(text, was_truncated)``. Bounds the response so a runaway command
+    can't blow up the caller's context.
+    """
+    raw = data or b""
+    if len(raw) > EXEC_MAX_OUTPUT_BYTES:
+        text = raw[:EXEC_MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+        return text + "\n[output truncated]", True
+    return raw.decode("utf-8", errors="replace"), False
+
 # ---------------------------------------------------------------------------
 # hermes-fast / hermes-reasoner — bypass model aliases
 # ---------------------------------------------------------------------------
@@ -1159,7 +1172,10 @@ class APIServerAdapter(BasePlatformAdapter):
 
         Response JSON::
 
-            {"output": "<combined stdout+stderr>", "exit_code": <int>, "duration_s": <float>}
+            {"output": "<stdout>", "exit_code": <int>, "duration_s": <float>, "stderr": "<stderr, if any>"}
+
+        ``output`` is stdout only; ``stderr`` is returned separately (and only
+        when non-empty) so the SSH login banner doesn't pollute the result.
         """
         auth_err = self._check_auth(request)
         if auth_err is not None:
@@ -1223,7 +1239,7 @@ class APIServerAdapter(BasePlatformAdapter):
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.DEVNULL,
             )
         except (FileNotFoundError, PermissionError) as exc:
@@ -1233,7 +1249,9 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         try:
-            stdout_data, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout_data, stderr_data = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
         except asyncio.TimeoutError:
             try:
                 proc.kill()
@@ -1241,24 +1259,28 @@ class APIServerAdapter(BasePlatformAdapter):
                 pass
             await proc.wait()
             return web.json_response({
-                "output": f"[exec timed out after {timeout:g}s]",
+                "output": "",
+                "stderr": f"[exec timed out after {timeout:g}s]",
                 "exit_code": 124,
                 "duration_s": round(time.monotonic() - started, 3),
                 "timed_out": True,
             })
 
         duration = time.monotonic() - started
-        output = (stdout_data or b"").decode("utf-8", errors="replace")
-        truncated = len(output.encode("utf-8")) > EXEC_MAX_OUTPUT_BYTES
-        if truncated:
-            output = output.encode("utf-8")[:EXEC_MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
-            output += "\n[output truncated]"
+        # Keep stdout and stderr separate so callers get clean command output:
+        # over SSH the remote host's pre-auth login banner is written to stderr,
+        # and merging it into stdout would bury the actual result (and waste the
+        # caller's tokens). stdout is the payload; stderr is advisory.
+        output, out_trunc = _truncate_exec_stream(stdout_data)
+        errtext, err_trunc = _truncate_exec_stream(stderr_data)
         payload = {
             "output": output,
             "exit_code": proc.returncode,
             "duration_s": round(duration, 3),
         }
-        if truncated:
+        if errtext:
+            payload["stderr"] = errtext
+        if out_trunc or err_trunc:
             payload["truncated"] = True
         return web.json_response(payload)
 
