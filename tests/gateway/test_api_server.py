@@ -414,6 +414,8 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_get("/v1/skills", adapter._handle_skills)
     app.router.add_get("/v1/toolsets", adapter._handle_toolsets)
+    app.router.add_post("/exec", adapter._handle_exec)
+    app.router.add_post("/v1/exec", adapter._handle_exec)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
@@ -3513,3 +3515,111 @@ class TestSessionKeyHeader:
             assert resp.status == 200
             data = await resp.json()
             assert data["features"]["session_key_header"] == "X-Hermes-Session-Key"
+
+
+# ---------------------------------------------------------------------------
+# /exec endpoint — non-agentic direct command execution
+# ---------------------------------------------------------------------------
+
+
+class TestExecEndpoint:
+    @pytest.mark.asyncio
+    async def test_exec_local_echo(self, adapter):
+        """POST /exec mode=local runs on the gateway host and returns raw output."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/exec", json={"cmd": "echo hello-exec", "mode": "local"}
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["exit_code"] == 0
+            assert "hello-exec" in data["output"]
+            assert isinstance(data["duration_s"], (int, float))
+
+    @pytest.mark.asyncio
+    async def test_exec_alias_v1(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/exec", json={"cmd": "echo via-v1", "mode": "local"}
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert "via-v1" in data["output"]
+
+    @pytest.mark.asyncio
+    async def test_exec_nonzero_exit_code(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/exec", json={"cmd": "exit 3", "mode": "local"}
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["exit_code"] == 3
+
+    @pytest.mark.live_system_guard_bypass
+    @pytest.mark.asyncio
+    async def test_exec_timeout(self, adapter):
+        # Real signal delivery is required: the timeout path kills the spawned
+        # subprocess, which is a genuine os.kill on a child PID.
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/exec", json={"cmd": "sleep 5", "mode": "local", "timeout": 1}
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["exit_code"] == 124
+            assert data.get("timed_out") is True
+
+    @pytest.mark.asyncio
+    async def test_exec_missing_cmd(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/exec", json={"mode": "local"})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_exec_invalid_mode(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/exec", json={"cmd": "echo x", "mode": "bogus"})
+            assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_exec_requires_auth(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/exec", json={"cmd": "echo x", "mode": "local"})
+            assert resp.status == 401
+
+    @pytest.mark.asyncio
+    async def test_exec_accepts_valid_auth(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/exec",
+                json={"cmd": "echo ok", "mode": "local"},
+                headers={"Authorization": "Bearer sk-secret"},
+            )
+            assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_exec_disabled_via_env(self, adapter):
+        app = _create_app(adapter)
+        with patch.dict(os.environ, {"HERMES_EXEC_ENABLED": "0"}):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/exec", json={"cmd": "echo x", "mode": "local"}
+                )
+                assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_capabilities_advertises_exec(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/v1/capabilities")
+            data = await resp.json()
+            assert data["endpoints"]["exec"] == {"method": "POST", "path": "/exec"}
