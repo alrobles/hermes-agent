@@ -107,7 +107,7 @@ def get_session_metrics() -> dict:
 _REMOTE_URL = os.environ.get("HERMES_REMOTE_URL", "https://hermes.ecoseek.org").rstrip("/")
 _API_KEY = os.environ.get("HERMES_ECOSEEK_API_KEY", "")
 _MODEL = os.environ.get("HERMES_REMOTE_MODEL", "hermes")
-_TIMEOUT = int(os.environ.get("HERMES_REMOTE_TIMEOUT", "300"))
+_TIMEOUT = int(os.environ.get("HERMES_REMOTE_TIMEOUT", "15"))
 
 # Legacy fallback (broker)
 _BROKER_URL = os.environ.get("ECOSEEK_BROKER_URL", "").rstrip("/")

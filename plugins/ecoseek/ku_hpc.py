@@ -34,10 +34,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_SLURM_TIMEOUT = int(os.environ.get("KU_HPC_TIMEOUT", "60"))
-_KU_HPC_BIN = os.environ.get(
-    "KU_HPC_BIN", "/home/reumanlab/local/bin/ku-hpc"
-)
+_SLURM_TIMEOUT = int(os.environ.get("KU_HPC_TIMEOUT", "20"))
+_KU_HPC_BIN = os.environ.get("KU_HPC_BIN", "/home/reumanlab-alpha/.local/bin/ku-hpc")
 
 SUPPORTED_ACTIONS = (
     "submit",
