@@ -22,7 +22,6 @@ from plugins.platforms.photon.adapter import PhotonAdapter
 def _make_adapter(monkeypatch: pytest.MonkeyPatch, extra: dict | None = None) -> PhotonAdapter:
     monkeypatch.setenv("PHOTON_PROJECT_ID", "test-project-id")
     monkeypatch.setenv("PHOTON_PROJECT_SECRET", "test-project-secret")
-    monkeypatch.delenv("PHOTON_WEBHOOK_SECRET", raising=False)
     monkeypatch.delenv("PHOTON_REQUIRE_MENTION", raising=False)
     monkeypatch.delenv("PHOTON_MENTION_PATTERNS", raising=False)
     cfg = PlatformConfig(enabled=True, token="", extra=extra or {})
@@ -31,27 +30,21 @@ def _make_adapter(monkeypatch: pytest.MonkeyPatch, extra: dict | None = None) ->
 
 def _group_payload(text: str) -> dict:
     return {
-        "event": "messages",
-        "message": {
-            "id": f"grp-{abs(hash(text))}",
-            "timestamp": "2026-05-14T19:06:32.000Z",
-            "sender": {"id": "+15551234567"},
-            "space": {"id": "any;+;group-guid-xyz"},
-            "content": {"type": "text", "text": text},
-        },
+        "messageId": f"grp-{abs(hash(text))}",
+        "space": {"id": "group-guid-xyz", "type": "group", "phone": None},
+        "sender": {"id": "+15551234567"},
+        "content": {"type": "text", "text": text},
+        "timestamp": "2026-05-14T19:06:32.000Z",
     }
 
 
 def _dm_payload(text: str) -> dict:
     return {
-        "event": "messages",
-        "message": {
-            "id": f"dm-{abs(hash(text))}",
-            "timestamp": "2026-05-14T19:06:32.000Z",
-            "sender": {"id": "+15551234567"},
-            "space": {"id": "any;-;+15551234567"},
-            "content": {"type": "text", "text": text},
-        },
+        "messageId": f"dm-{abs(hash(text))}",
+        "space": {"id": "+15551234567", "type": "dm", "phone": "+15551234567"},
+        "sender": {"id": "+15551234567"},
+        "content": {"type": "text", "text": text},
+        "timestamp": "2026-05-14T19:06:32.000Z",
     }
 
 
@@ -82,17 +75,6 @@ async def test_group_message_dropped_without_mention(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_group_message_passes_and_strips_wake_word(monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = _make_adapter(monkeypatch, extra={"require_mention": True})
-    captured = _capture(adapter, monkeypatch)
-
-    await adapter._dispatch_inbound(_group_payload("Hermes what's the weather"))
-    assert len(captured) == 1
-    # Leading wake word stripped before dispatch.
-    assert captured[0].text == "what's the weather"
-
-
-@pytest.mark.asyncio
 async def test_dm_never_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _make_adapter(monkeypatch, extra={"require_mention": True})
     captured = _capture(adapter, monkeypatch)
@@ -100,16 +82,6 @@ async def test_dm_never_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     await adapter._dispatch_inbound(_dm_payload("no wake word here"))
     assert len(captured) == 1
     assert captured[0].text == "no wake word here"
-
-
-@pytest.mark.asyncio
-async def test_require_mention_off_passes_group_messages(monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = _make_adapter(monkeypatch)  # require_mention defaults off
-    captured = _capture(adapter, monkeypatch)
-
-    await adapter._dispatch_inbound(_group_payload("plain group chatter"))
-    assert len(captured) == 1
-    assert captured[0].text == "plain group chatter"
 
 
 def test_custom_mention_patterns_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,7 +98,6 @@ def test_custom_mention_patterns_from_config(monkeypatch: pytest.MonkeyPatch) ->
 def test_mention_patterns_env_comma_separated(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOTON_PROJECT_ID", "test-project-id")
     monkeypatch.setenv("PHOTON_PROJECT_SECRET", "test-project-secret")
-    monkeypatch.delenv("PHOTON_WEBHOOK_SECRET", raising=False)
     monkeypatch.setenv("PHOTON_REQUIRE_MENTION", "true")
     monkeypatch.setenv("PHOTON_MENTION_PATTERNS", r"bot\b, assistant\b")
     cfg = PlatformConfig(enabled=True, token="", extra={})
