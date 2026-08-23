@@ -126,6 +126,78 @@ def _summarize_early_messages(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _local_llm_fallback(system_prompt: str, messages: list[dict]) -> dict:
+    """Fallback to local LLM providers when Beta is unreachable."""
+    import urllib.request as _urllib_req
+
+    # Try providers in order: Mimo → OpenRouter → Ollama
+    mimo_key = os.environ.get("XIAOMI_API_KEY", "")
+    or_key = os.environ.get("OPENROUTER_API_KEY", "")
+    ollama_url = os.environ.get("OLLAMA_URL", "")
+
+    api_messages = []
+    if system_prompt:
+        api_messages.append({"role": "system", "content": system_prompt})
+    for m in messages:
+        role = "assistant" if m.get("from") == "beta" else "user"
+        api_messages.append({"role": role, "content": m["content"]})
+
+    providers = []
+    if mimo_key:
+        providers.append(("mimo", {
+            "url": "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions",
+            "model": "mimo-v2.5", "key": mimo_key,
+        }))
+    if or_key:
+        providers.append(("openrouter", {
+            "url": "https://openrouter.ai/api/v1/chat/completions",
+            "model": "deepseek/deepseek-chat-v3-0324", "key": or_key,
+        }))
+    if ollama_url:
+        url = ollama_url if "/api/generate" in ollama_url else f"{ollama_url}/api/generate"
+        providers.append(("ollama", {"url": url, "model": os.environ.get("OLLAMA_MODEL", "deepseek-r1:14b")}))
+
+    for name, cfg in providers:
+        try:
+            if "key" in cfg:
+                body = json.dumps({
+                    "model": cfg["model"], "messages": api_messages,
+                    "max_tokens": 1500, "temperature": 0.3,
+                }).encode()
+                req = _urllib_req.Request(cfg["url"], data=body, headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {cfg['key']}",
+                }, method="POST")
+                with _urllib_req.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read())
+                    return {
+                        "content": data["choices"][0]["message"]["content"],
+                        "model": data.get("model", cfg["model"]),
+                        "usage": data.get("usage", {}),
+                    }
+            else:
+                # Ollama
+                combined = "\n".join(m["content"] for m in api_messages if m["role"] == "user")[-2000:]
+                body = json.dumps({
+                    "model": cfg["model"], "prompt": combined, "stream": False,
+                    "options": {"temperature": 0.3, "num_predict": 1500},
+                }).encode()
+                req = _urllib_req.Request(cfg["url"], data=body, headers={
+                    "Content-Type": "application/json",
+                }, method="POST")
+                with _urllib_req.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read())
+                    return {
+                        "content": data.get("response", ""),
+                        "model": cfg["model"], "usage": {},
+                    }
+        except Exception as exc:
+            logger.warning("local fallback[%s] failed: %s", name, str(exc)[:80])
+            continue
+
+    raise RuntimeError("All providers (remote + local) failed")
+
+
 def _send_to_beta(system_prompt: str, messages: list[dict],
                   max_tokens: int = 0) -> dict:
     """Send a request to Beta (Hermes remote) via hermes.ecoseek.org.
@@ -182,8 +254,12 @@ def _send_to_beta(system_prompt: str, messages: list[dict],
         method="POST",
     )
 
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        logger.warning("Beta unreachable (%s), using local fallback", str(exc)[:100])
+        return _local_llm_fallback(system_prompt, messages)
 
     choices = data.get("choices", [])
     if not choices:

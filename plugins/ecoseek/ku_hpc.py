@@ -25,6 +25,7 @@ Common paths on HPC:
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 _SLURM_TIMEOUT = int(os.environ.get("KU_HPC_TIMEOUT", "20"))
 _KU_HPC_BIN = os.environ.get("KU_HPC_BIN", "/home/reumanlab-alpha/.local/bin/ku-hpc")
+_KU_HPC_SSH_ALIAS = os.environ.get("KU_HPC_SSH_ALIAS", "kuhpc")
+_KU_HPC_USER = os.environ.get("KU_HPC_USER", "a474r867")
 
 SUPPORTED_ACTIONS = (
     "submit",
@@ -59,9 +62,43 @@ def _has_slurm() -> bool:
     return shutil.which("sbatch") is not None
 
 
+def _has_ssh_alias() -> bool:
+    """Return True when the kuhpc SSH alias is configured (gamma path)."""
+    if _KU_HPC_SSH_ALIAS in ("", "none"):
+        return False
+    return subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+         "-G", _KU_HPC_SSH_ALIAS],
+        capture_output=True, timeout=15,
+    ).returncode == 0
+
+
 def check_slurm_available() -> bool:
     """Return True when we can talk to the HPC cluster."""
-    return _has_wrapper() or _has_slurm()
+    return _has_wrapper() or _has_ssh_alias() or _has_slurm()
+
+
+def _run_via_ssh(slurm_cmd: str, timeout: int | None = None) -> dict:
+    """Run a command on the cluster through the kuhpc SSH alias.
+
+    ssh concatenates its arguments without transmitting quoting, so the
+    command is base64-encoded and decoded remotely — bulletproof against
+    pipes, format strings and shell metacharacters. The SSH banner
+    (KU access notice) is stripped from stdout.
+    """
+    b64 = base64.b64encode(slurm_cmd.encode()).decode()
+    result = _run_cmd(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+         _KU_HPC_SSH_ALIAS, f"echo {b64} | base64 -d | bash"],
+        timeout=timeout,
+    )
+    banner = ("Access to electronic resources",)
+    lines = [
+        l for l in result["stdout"].splitlines()
+        if not any(b in l for b in banner) and l.strip()
+    ]
+    result["stdout"] = "\n".join(lines).strip()
+    return result
 
 
 def _run_cmd(cmd: list[str], timeout: int | None = None) -> dict:
@@ -164,6 +201,8 @@ def ku_hpc(
         })
 
     use_wrapper = _has_wrapper()
+    # gamma path: no wrapper, no local Slurm → tunnel through SSH alias
+    use_ssh = not use_wrapper and not _has_slurm()
 
     # --- submit ---
     if action == "submit":
@@ -178,6 +217,14 @@ def ku_hpc(
             result = _run_cmd(
                 [_KU_HPC_BIN, "submit-template", script], timeout=60
             )
+        elif use_ssh:
+            cmd = "sbatch"
+            if partition:
+                cmd += f" --partition {partition}"
+            if extra_args:
+                cmd += f" {extra_args}"
+            cmd += f" {script}"
+            result = _run_via_ssh(cmd, timeout=30)
         else:
             cmd = ["sbatch"]
             if partition:
@@ -217,15 +264,25 @@ def ku_hpc(
             if job_id:
                 all_jobs = [j for j in all_jobs if j["job_id"] == job_id]
             else:
-                user = os.environ.get("USER", "a474r867")
+                user = os.environ.get("KU_HPC_USER", _KU_HPC_USER)
                 all_jobs = [j for j in all_jobs if j.get("user") == user]
         else:
-            cmd = ["squeue", "--format=%i|%u|%T|%M|%D|%R|%j", "--noheader"]
-            if job_id:
-                cmd.extend(["--job", job_id])
+            if use_ssh:
+                # remote side runs through bash → quote the | format string
+                fmt = "'%i|%u|%T|%M|%D|%R|%j'"
+                parts = ["squeue", f"--format={fmt}", "--noheader"]
+                if job_id:
+                    parts.append(f"--job {job_id}")
+                else:
+                    parts.append(f"--user {os.environ.get('KU_HPC_USER', _KU_HPC_USER)}")
+                result = _run_via_ssh(" ".join(parts))
             else:
-                cmd.extend(["--user", os.environ.get("USER", "a474r867")])
-            result = _run_cmd(cmd)
+                cmd = ["squeue", "--format=%i|%u|%T|%M|%D|%R|%j", "--noheader"]
+                if job_id:
+                    cmd.extend(["--job", job_id])
+                else:
+                    cmd.extend(["--user", os.environ.get("KU_HPC_USER", _KU_HPC_USER)])
+                result = _run_cmd(cmd)
             all_jobs = _parse_squeue_json(result["stdout"])
 
         logger.info("ku_hpc status: %d jobs", len(all_jobs))
@@ -234,7 +291,7 @@ def ku_hpc(
             "action": "status",
             "jobs": all_jobs,
             "total": len(all_jobs),
-            "method": "wrapper" if use_wrapper else "direct",
+            "method": "wrapper" if use_wrapper else ("ssh" if use_ssh else "direct"),
         })
 
     # --- cancel ---
@@ -247,6 +304,8 @@ def ku_hpc(
             })
         if use_wrapper:
             result = _run_via_wrapper(f"scancel {job_id}")
+        elif use_ssh:
+            result = _run_via_ssh(f"scancel {job_id}")
         else:
             result = _run_cmd(["scancel", job_id])
         logger.info("ku_hpc cancel: job_id=%s rc=%d", job_id, result["returncode"])
@@ -273,6 +332,8 @@ def ku_hpc(
         )
         if use_wrapper:
             result = _run_via_wrapper(sacct_cmd, timeout=30)
+        elif use_ssh:
+            result = _run_via_ssh(sacct_cmd, timeout=30)
         else:
             result = _run_cmd(sacct_cmd.split())
 
@@ -301,11 +362,15 @@ def ku_hpc(
 
     # --- info ---
     elif action == "info":
-        sinfo_cmd = "sinfo --format=%P|%a|%l|%D|%T|%C|%G --noheader"
-        if use_wrapper:
-            result = _run_via_wrapper(sinfo_cmd, timeout=30)
+        if use_ssh:
+            sinfo_cmd = "sinfo --format='%P|%a|%l|%D|%T|%C|%G' --noheader"
+            result = _run_via_ssh(sinfo_cmd, timeout=30)
         else:
-            result = _run_cmd(sinfo_cmd.split())
+            sinfo_cmd = "sinfo --format=%P|%a|%l|%D|%T|%C|%G --noheader"
+            if use_wrapper:
+                result = _run_via_wrapper(sinfo_cmd, timeout=30)
+            else:
+                result = _run_cmd(sinfo_cmd.split())
 
         partitions = []
         for line in result["stdout"].splitlines():
@@ -333,7 +398,7 @@ def ku_hpc(
 
     # --- account_usage ---
     elif action == "account_usage":
-        user = os.environ.get("USER", "a474r867")
+        user = os.environ.get("KU_HPC_USER", _KU_HPC_USER)
         sacct_cmd = (
             f"sacct --user {user} --starttime now-7days "
             f"--format=JobID,JobName,Partition,State,Elapsed,MaxRSS,ExitCode "
@@ -341,6 +406,8 @@ def ku_hpc(
         )
         if use_wrapper:
             result = _run_via_wrapper(sacct_cmd, timeout=30)
+        elif use_ssh:
+            result = _run_via_ssh(sacct_cmd, timeout=30)
         else:
             result = _run_cmd(sacct_cmd.split())
         return json.dumps({
@@ -359,6 +426,8 @@ def ku_hpc(
             })
         if use_wrapper:
             result = _run_via_wrapper(command, timeout=_SLURM_TIMEOUT)
+        elif use_ssh:
+            result = _run_via_ssh(command, timeout=_SLURM_TIMEOUT)
         else:
             result = _run_cmd(["bash", "-c", command], timeout=_SLURM_TIMEOUT)
 
@@ -383,6 +452,8 @@ def ku_hpc(
         timeout = int(extra_args) if extra_args and extra_args.isdigit() else _SLURM_TIMEOUT * 3
         if use_wrapper:
             result = _run_via_wrapper(command, timeout=timeout)
+        elif use_ssh:
+            result = _run_via_ssh(command, timeout=timeout)
         else:
             result = _run_cmd(["bash", "-c", command], timeout=timeout)
 
