@@ -19,10 +19,12 @@
 #             requested emits all of them.
 #   --repo    repository to read tags from (default: this checkout).
 #
-# Reads tags from the local checkout, so it needs one fetched with tags
-# (actions/checkout with fetch-depth: 0, or `fetch-tags: true`). A shallow
-# checkout has no tags and this exits non-zero rather than silently emitting an
-# empty matrix.
+# Reads tags from the local checkout, so it needs one fetched with full history
+# and tags (actions/checkout with fetch-depth: 0). If there are no release tags
+# at all, fall back to the current branch/commit so forks without releases still
+# exercise the install/update route. A shallow checkout with no visible tags is
+# still an error: that shape can hide real releases and would silently weaken
+# coverage.
 #
 # Only vYYYY.M.D[.N] release tags are considered; the repo also carries
 # backup/* and one-off tags that are not releases.
@@ -74,10 +76,23 @@ mapfile -t tags < <(
 
 total="${#tags[@]}"
 if [ "$total" -eq 0 ]; then
-  echo "error: no release tags found in $REPO" >&2
-  echo '       A shallow clone has no tags: fetch with tags (actions/checkout' >&2
-  echo '       with fetch-depth: 0, or fetch-tags: true).' >&2
-  exit 1
+  is_shallow="$(git -C "$REPO" rev-parse --is-shallow-repository 2>/dev/null || printf false)"
+  if [ "$is_shallow" = "true" ]; then
+    echo "error: no release tags found in $REPO" >&2
+    echo '       A shallow clone has no tags: fetch with full history' >&2
+    echo '       (actions/checkout with fetch-depth: 0).' >&2
+    exit 1
+  fi
+
+  branch_name="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ -n "$branch_name" ] && [ "$branch_name" != "HEAD" ]; then
+    fallback_ref="refs/heads/$branch_name"
+  else
+    fallback_ref="$(git -C "$REPO" rev-parse HEAD)"
+  fi
+  echo "warning: no release tags found in $REPO; falling back to $fallback_ref" >&2
+  printf '["%s"]\n' "$fallback_ref"
+  exit 0
 fi
 
 if [ "$total" -le "$COUNT" ]; then
