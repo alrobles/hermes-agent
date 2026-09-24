@@ -440,6 +440,17 @@ class ChatCompletionsTransport(ProviderTransport):
             if thinking_config:
                 extra_body["thinking_config"] = thinking_config
 
+        # Ollama num_ctx: inject into extra_body.options so the Ollama backend
+        # uses the full context window regardless of its default 2048 limit.
+        # This is critical for reasoning models (deepseek-v4-flash) where the
+        # reasoning tokens consume context *before* generating output — without
+        # num_ctx the model "thinks" and then has no room left for the answer.
+        ollama_num_ctx = params.get("ollama_num_ctx")
+        if ollama_num_ctx:
+            options = extra_body.get("options", {})
+            options["num_ctx"] = ollama_num_ctx
+            extra_body["options"] = options
+
         # Merge any pre-built extra_body additions
         additions = params.get("extra_body_additions")
         if additions:
